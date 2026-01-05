@@ -35,10 +35,10 @@ sudo apt install -y \
   ros-jazzy-gz-sim-vendor \
   ros-jazzy-moveit
 sudo ldconfig
+sudo apt install -y ros-jazzy-moveit
 
 export LD_LIBRARY_PATH=/opt/ros/jazzy/opt/gz-transport-vendor/lib:/opt/ros/jazzy/opt/gz-msgs-vendor/lib:$LD_LIBRARY_PATH
 # Install MoveIt meta-package to provide move_group
-sudo apt install -y ros-jazzy-moveit
 
 git clone https://github.com/ycheng517/ar4_ros_driver
 git clone https://github.com/ycheng517/ar4_hand_eye_calibration
