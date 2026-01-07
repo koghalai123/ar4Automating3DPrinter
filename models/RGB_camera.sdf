@@ -1,0 +1,70 @@
+<?xml version="1.0" ?>
+<!-- RGB Camera Model for Gazebo Simulation -->
+<sdf version="1.6">
+  <world name="camera_world">
+    <!-- Load the sensors system plugin to enable camera data publishing -->
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <model name="rgb_camera">
+      <!-- Camera position: x y z roll pitch yaw (0.5m above ground) -->
+      <pose>0 0 0.5 0 0 0</pose>
+      <static>true</static> <!-- Camera doesn't move -->
+      
+      <link name="link">
+        <pose>0 0 0 0 0 0</pose>
+        
+        <!-- Visual representation (small box) -->
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.1 0.1 0.1</size>
+            </box>
+          </geometry>
+        </visual>
+
+        <!-- Camera sensor configuration -->
+        <sensor type="camera" name="camera_sensor">
+          <pose>0 0 0 0 0 0</pose>
+          <camera>
+            <!-- Field of view: 1.047 radians = ~60 degrees -->
+            <horizontal_fov>1.047</horizontal_fov>
+            <image>
+              <width>320</width>
+              <height>240</height>
+              <format>R8G8B8</format> <!-- RGB color format -->
+            </image>
+            <clip>
+              <near>0.1</near>  <!-- Minimum viewing distance -->
+              <far>100</far>    <!-- Maximum viewing distance -->
+            </clip>
+          </camera>
+          <always_on>1</always_on>        <!-- Keep sensor running -->
+          <update_rate>30</update_rate>   <!-- 30 Hz update rate -->
+          <visualize>true</visualize>     <!-- Show in Gazebo GUI -->
+          <topic>rgb_camera/image</topic> <!-- Gazebo topic name -->
+        </sensor>
+
+      </link>
+    </model>
+  </world>
+</sdf>
+
+<!-- 
+  Launch commands:
+  
+  1. Start Gazebo simulation:
+     gz sim -r -v 4 /home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/RGB_camera.sdf
+  
+  2. Bridge to ROS 2:
+     ros2 run ros_gz_bridge parameter_bridge /rgb_camera/image@sensor_msgs/msg/Image[gz.msgs.Image /rgb_camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo
+  
+  3. View in RViz2:
+     rviz2
+     Then add "Image" display and set topic to /rgb_camera/image
+-->
+
+

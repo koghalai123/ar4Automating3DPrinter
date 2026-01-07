@@ -1,0 +1,65 @@
+<?xml version="1.0" ?>
+<!-- RGB Camera Model - Can be spawned into any Gazebo world -->
+<sdf version="1.6">
+  <model name="rgb_camera">
+    <!-- Camera position: x y z roll pitch yaw -->
+    <!-- Position 2m above ground, pointing straight down (pitch=90 degrees = 1.5708 radians) -->
+    <pose>0 0 2.0 0 1.5708 0</pose>
+    <static>true</static> <!-- Camera doesn't move -->
+    
+    <link name="link">
+      <pose>0 0 0 0 0 0</pose>
+      
+      <!-- Visual representation (small box) -->
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>0.1 0.1 0.1</size>
+          </box>
+        </geometry>
+      </visual>
+
+      <!-- Camera sensor configuration -->
+      <sensor type="camera" name="camera_sensor">
+        <pose>0 0 0 0 0 0</pose>
+        <camera>
+          <!-- Field of view: 1.047 radians = ~60 degrees -->
+          <horizontal_fov>1.047</horizontal_fov>
+          <image>
+            <width>320</width>
+            <height>240</height>
+            <format>R8G8B8</format> <!-- RGB color format -->
+          </image>
+          <clip>
+            <near>0.1</near>  <!-- Minimum viewing distance -->
+            <far>100</far>    <!-- Maximum viewing distance -->
+          </clip>
+        </camera>
+        <always_on>1</always_on>        <!-- Keep sensor running -->
+        <update_rate>30</update_rate>   <!-- 30 Hz update rate -->
+        <visualize>true</visualize>     <!-- Show in Gazebo GUI -->
+        <topic>rgb_camera/image</topic> <!-- Gazebo topic name -->
+      </sensor>
+
+    </link>
+  </model>
+</sdf>
+
+<!-- 
+  To spawn this camera into an existing Gazebo world:
+  
+  1. First, launch your existing world with the sensors plugin:
+     gz sim -r your_world.sdf
+  
+  2. Then spawn the camera:
+     gz service -s /world/default/create \
+        --reqtype gz.msgs.EntityFactory \
+        --reptype gz.msgs.Boolean \
+        --timeout 1000 \
+        --req 'sdf_filename: "/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/RGB_camera_model.sdf"'
+  
+  Or use the Gazebo GUI:
+  - Click the three dots menu (top right)
+  - Select "Insert" or "Spawn from file"
+  - Browse to this SDF file
+-->

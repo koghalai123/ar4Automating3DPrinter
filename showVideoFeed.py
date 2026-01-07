@@ -4,10 +4,10 @@ Simple ROS 2 image viewer for Gazebo/ROS camera topics.
 
 Usage (example):
   source ~/ar4_ws/install/setup.bash
-  python3 src/ar4Automating3DPrinter/showVideoFeed.py --topic /sim_camera/image_raw
+  python3 src/ar4Automating3DPrinter/showVideoFeed.py --topic /overhead_camera
 
 Options:
-  --topic: Image topic to subscribe to (default: /sim_camera/image_raw)
+  --topic: Image topic to subscribe to (default: /overhead_camera)
 """
 
 import argparse
@@ -66,7 +66,7 @@ def main() -> None:
 	parser = argparse.ArgumentParser(description="ROS 2 Image Viewer")
 	parser.add_argument(
 		"--topic",
-		default="/sim_camera/image_raw",
+		default="/overhead_camera",
 		help="Image topic to subscribe to",
 	)
 	args = parser.parse_args()
