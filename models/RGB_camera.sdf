@@ -1,23 +1,12 @@
-<?xml version="1.0" ?>
-<!-- RGB Camera Model for Gazebo Simulation -->
+<?xml version="1.0"?>
 <sdf version="1.6">
-  <world name="camera_world">
-    <!-- Load the sensors system plugin to enable camera data publishing -->
-    <plugin
-      filename="gz-sim-sensors-system"
-      name="gz::sim::systems::Sensors">
-      <render_engine>ogre2</render_engine>
-    </plugin>
-
-    <model name="rgb_camera">
-      <!-- Camera position: x y z roll pitch yaw (0.5m above ground) -->
-      <pose>0 0 0.5 0 0 0</pose>
-      <static>true</static> <!-- Camera doesn't move -->
+  <model name="rgb_camera">
+      <pose>0 0 2.0 0 1.5708 0</pose>
+      <static>true</static>
       
       <link name="link">
         <pose>0 0 0 0 0 0</pose>
         
-        <!-- Visual representation (small box) -->
         <visual name="visual">
           <geometry>
             <box>
@@ -26,45 +15,67 @@
           </geometry>
         </visual>
 
-        <!-- Camera sensor configuration -->
         <sensor type="camera" name="camera_sensor">
           <pose>0 0 0 0 0 0</pose>
           <camera>
-            <!-- Field of view: 1.047 radians = ~60 degrees -->
             <horizontal_fov>1.047</horizontal_fov>
             <image>
               <width>320</width>
               <height>240</height>
-              <format>R8G8B8</format> <!-- RGB color format -->
+              <format>R8G8B8</format>
             </image>
             <clip>
-              <near>0.1</near>  <!-- Minimum viewing distance -->
-              <far>100</far>    <!-- Maximum viewing distance -->
+              <near>0.1</near>
+              <far>100</far>
             </clip>
           </camera>
-          <always_on>1</always_on>        <!-- Keep sensor running -->
-          <update_rate>30</update_rate>   <!-- 30 Hz update rate -->
-          <visualize>true</visualize>     <!-- Show in Gazebo GUI -->
-          <topic>rgb_camera/image</topic> <!-- Gazebo topic name -->
+          <always_on>1</always_on>
+          <update_rate>30</update_rate>
+          <visualize>true</visualize>
+          <topic>rgb_camera/image</topic>
         </sensor>
-
       </link>
-    </model>
-  </world>
-</sdf>
+    </model>   
 
-<!-- 
-  Launch commands:
-  
-  1. Start Gazebo simulation:
-     gz sim -r -v 4 /home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/RGB_camera.sdf
-  
-  2. Bridge to ROS 2:
-     ros2 run ros_gz_bridge parameter_bridge /rgb_camera/image@sensor_msgs/msg/Image[gz.msgs.Image /rgb_camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo
-  
-  3. View in RViz2:
-     rviz2
-     Then add "Image" display and set topic to /rgb_camera/image
+<!--
+Launch commands for adding to gazebo world that already exists and has proper 
+plugins already loaded( 
+    <plugin
+      filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics">
+    </plugin>
+
+    <plugin
+      filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+
+    <plugin
+      filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+
+    <!-- Sensors system plugin to enable camera and other sensor data publishing -->
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    )
+
+1. ros2 launch annin_ar4_gazebo gazebo.launch.py
+
+2. gz service -s /world/default/create \
+  --reqtype gz.msgs.EntityFactory \
+  --reptype gz.msgs.Boolean \
+  --timeout 2000 \
+  --req 'name: "rgb_camera" sdf_filename: "/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/RGB_camera.sdf" allow_renaming: true'
+
+3. Gazebo-ROS bridge launch
+ros2 run ros_gz_bridge parameter_bridge   /rgb_camera/image@sensor_msgs/msg/Image[gz.msgs.Image   /rgb_camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo
+
 -->
+
+</sdf>
 
 
