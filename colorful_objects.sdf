@@ -1,0 +1,470 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="colorful_objects_world">
+    
+    <!-- Red Box -->
+    <model name="red_box">
+      <pose>0.3 0.3 0.04 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.0167</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.0167</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.0167</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.08 0.08 0.08</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.08 0.08 0.08</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>1.0 0.0 0.0 1.0</ambient>
+            <diffuse>1.0 0.0 0.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Green Box -->
+    <model name="green_box">
+      <pose>0.3 0.1 0.04 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.0167</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.0167</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.0167</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.08 0.08 0.08</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.08 0.08 0.08</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.0 1.0 0.0 1.0</ambient>
+            <diffuse>0.0 1.0 0.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Blue Box -->
+    <model name="blue_box">
+      <pose>0.3 -0.1 0.04 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.0167</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.0167</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.0167</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.08 0.08 0.08</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.08 0.08 0.08</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.0 0.0 1.0 1.0</ambient>
+            <diffuse>0.0 0.0 1.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Yellow Box -->
+    <model name="yellow_box">
+      <pose>0.3 -0.3 0.04 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.0167</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.0167</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.0167</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.08 0.08 0.08</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.08 0.08 0.08</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>1.0 1.0 0.0 1.0</ambient>
+            <diffuse>1.0 1.0 0.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Magenta Sphere -->
+    <model name="magenta_sphere">
+      <pose>0.5 0.3 0.04 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.01</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.01</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.01</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <sphere>
+              <radius>0.04</radius>
+            </sphere>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <sphere>
+              <radius>0.04</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>1.0 0.0 1.0 1.0</ambient>
+            <diffuse>1.0 0.0 1.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Cyan Sphere -->
+    <model name="cyan_sphere">
+      <pose>0.5 0.1 0.04 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.01</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.01</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.01</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <sphere>
+              <radius>0.04</radius>
+            </sphere>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <sphere>
+              <radius>0.04</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.0 1.0 1.0 1.0</ambient>
+            <diffuse>0.0 1.0 1.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Orange Sphere -->
+    <model name="orange_sphere">
+      <pose>0.5 -0.1 0.04 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.01</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.01</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.01</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <sphere>
+              <radius>0.04</radius>
+            </sphere>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <sphere>
+              <radius>0.04</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>1.0 0.5 0.0 1.0</ambient>
+            <diffuse>1.0 0.5 0.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Purple Sphere -->
+    <model name="purple_sphere">
+      <pose>0.5 -0.3 0.04 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.01</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.01</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.01</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <sphere>
+              <radius>0.04</radius>
+            </sphere>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <sphere>
+              <radius>0.04</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.5 0.0 0.5 1.0</ambient>
+            <diffuse>0.5 0.0 0.5 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Red Cylinder -->
+    <model name="red_cylinder">
+      <pose>0.4 0.2 0.05 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.02</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.02</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.01</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.03</radius>
+              <length>0.1</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.03</radius>
+              <length>0.1</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>1.0 0.0 0.0 1.0</ambient>
+            <diffuse>1.0 0.0 0.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Blue Cylinder -->
+    <model name="blue_cylinder">
+      <pose>0.4 0.0 0.05 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.02</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.02</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.01</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.03</radius>
+              <length>0.1</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.03</radius>
+              <length>0.1</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.0 0.0 1.0 1.0</ambient>
+            <diffuse>0.0 0.0 1.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Green Cylinder -->
+    <model name="green_cylinder">
+      <pose>0.4 -0.2 0.05 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.02</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.02</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.01</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.03</radius>
+              <length>0.1</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.03</radius>
+              <length>0.1</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.0 1.0 0.0 1.0</ambient>
+            <diffuse>0.0 1.0 0.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- White Tower (tall landmark) -->
+    <model name="white_tower">
+      <pose>0.6 0.0 0.15 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia>
+            <ixx>0.03</ixx>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyy>0.03</iyy>
+            <iyz>0.0</iyz>
+            <izz>0.01</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.05</radius>
+              <length>0.3</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.05</radius>
+              <length>0.3</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>1.0 1.0 1.0 1.0</ambient>
+            <diffuse>1.0 1.0 1.0 1.0</diffuse>
+            <specular>0.1 0.1 0.1 1.0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>
