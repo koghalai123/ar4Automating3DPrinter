@@ -61,7 +61,7 @@ class ObjectGenerator:
             b = random.uniform(0.0, 1.0)
             return (r, g, b, 1.0)
     
-    def generate_position_circular(self, radius_min=0.2, radius_max=0.6, height=0.04):
+    def generate_position_circular(self, radius_min=0.2, radius_max=1.5, height=0.04):
         """Generate a position in a circular pattern around origin"""
         angle = random.uniform(0, 2 * math.pi)
         radius = random.uniform(radius_min, radius_max)
@@ -269,7 +269,7 @@ def generate_demo_scene(seed=None):
     return gen
 
 
-def generate_random_scene(count=20, seed=None):
+def generate_random_scene(count=30, seed=None):
     """Generate a completely random scene"""
     gen = ObjectGenerator(seed=seed)
     gen.generate_random_objects(count=count)
