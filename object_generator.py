@@ -142,7 +142,7 @@ class ObjectGenerator:
         self.generated_objects.append(obj)
         return obj
     
-    def generate_random_objects(self, count=20, shape_distribution=None):
+    def generate_random_objects(self, count=40, shape_distribution=None):
         """
         Generate a collection of random objects
         
@@ -286,7 +286,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate and spawn objects in Gazebo')
     parser.add_argument('--scene', choices=['demo', 'random'], default='random',
                        help='Scene type: demo (preset + random) or random (all random)')
-    parser.add_argument('--count', type=int, default=20,
+    parser.add_argument('--count', type=int, default=40,
                        help='Number of objects to generate')
     parser.add_argument('--seed', type=int, default=None,
                        help='Random seed for reproducibility')
