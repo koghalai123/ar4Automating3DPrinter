@@ -227,7 +227,7 @@ class VisualOdometryROS(Node):
         # Subscribe to camera feed
         self.image_sub = self.create_subscription(
             Image,
-            '/rgb_camera_moving/image',
+            '/rgbd_camera/image',
             self.image_callback,
             10
         )
@@ -246,7 +246,7 @@ class VisualOdometryROS(Node):
         self.last_position = np.zeros((3, 1))
         
         self.get_logger().info('Visual Odometry ROS node started')
-        self.get_logger().info('Subscribing to /rgb_camera_moving/image')
+        self.get_logger().info('Subscribing to /rgbd_camera/image')
         self.get_logger().info('Publishing pose on /vo/pose and path on /vo/path')
         self.get_logger().info('Press Ctrl+C to quit')
         

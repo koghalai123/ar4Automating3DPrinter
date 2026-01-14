@@ -1,0 +1,148 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="aruco_cube">
+    <pose>0.5 0.0 0.05 0 0 0</pose>
+    <link name="link">
+      <inertial>
+        <mass>0.5</mass>
+        <inertia>
+          <ixx>0.000833</ixx>
+          <ixy>0.0</ixy>
+          <ixz>0.0</ixz>
+          <iyy>0.000833</iyy>
+          <iyz>0.0</iyz>
+          <izz>0.000833</izz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>0.1 0.1 0.1</size>
+          </box>
+        </geometry>
+      </collision>
+      
+      <!-- Each face as a separate visual with the ArUco marker texture -->
+      <!-- Front face (+X) -->
+      <visual name="visual_front">
+        <pose>0.05 0 0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.001 0.1 0.1</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0 0 0 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>file://arucoMarker.svg</albedo_map>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+      
+      <!-- Back face (-X) -->
+      <visual name="visual_back">
+        <pose>-0.05 0 0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.001 0.1 0.1</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0 0 0 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>file://arucoMarker.svg</albedo_map>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+      
+      <!-- Right face (+Y) -->
+      <visual name="visual_right">
+        <pose>0 0.05 0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.1 0.001 0.1</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0 0 0 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>file://arucoMarker.svg</albedo_map>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+      
+      <!-- Left face (-Y) -->
+      <visual name="visual_left">
+        <pose>0 -0.05 0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.1 0.001 0.1</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0 0 0 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>file://arucoMarker.svg</albedo_map>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+      
+      <!-- Top face (+Z) -->
+      <visual name="visual_top">
+        <pose>0 0 0.05 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.1 0.1 0.001</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0 0 0 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>file://arucoMarker.svg</albedo_map>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+      
+      <!-- Bottom face (-Z) -->
+      <visual name="visual_bottom">
+        <pose>0 0 -0.05 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.1 0.1 0.001</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0 0 0 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>file://arucoMarker.svg</albedo_map>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+      
+    </link>
+  </model>
+</sdf>
