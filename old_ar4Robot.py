@@ -136,7 +136,7 @@ class AR4_ROBOT(Node):
     
     def get_current_pose(self, reference_frame="base_link"):
         """Get the current end effector pose."""
-        #self.moveit2.reset_new_joint_state_checker()
+        self.moveit2.reset_new_joint_state_checker()
         fk_result = self.moveit2.compute_fk()
         
         if fk_result is None:
