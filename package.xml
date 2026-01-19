@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>ar4Automating3DPrinter</name>
+  <version>0.1.0</version>
+  <description>Local models and tools for AR4 3D printer automation.</description>
+  <maintainer email="user@example.com">User</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <export/>
+</package>

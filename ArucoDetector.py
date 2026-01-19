@@ -1,6 +1,6 @@
 # Aruco marker can be spawned ingazebo with these commands: 
 # export GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models
-# ros2 run ros_gz_sim create -file /home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf -name aruco_marker -x 0 -y -1 -z 1 -R 0 -P 0 -Y -1.57
+# ros2 run ros_gz_sim create -file /home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf -name aruco_marker -x -0.6 -y 0 -z 0.4 -R 0 -P 0 -Y 0
 
 
 
@@ -13,12 +13,14 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 import cv2
-import numpy as np
 from showVideoFeed import CameraViewer
 from poseReader import PoseReader
 from rclpy.time import Time
 import tf2_ros
 from scipy.spatial.transform import Rotation as R
+import numpy as np
+import subprocess
+import time
 
 
 class ArucoDetectionViewer(PoseReader, CameraViewer):
@@ -27,11 +29,11 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
     """
     def __init__(self):
         # Cooperative multiple inheritance with explicit node name
-        super().__init__('aruco_detection_viewer')
+        super().__init__('aruco_detection_viewer', enable_pose_print=False)
         
         # Declare ArUco-specific parameters
         self.declare_parameter('aruco_dict', 'DICT_4X4_50')
-        self.declare_parameter('marker_size', 0.15)  # Size in meters (matching your model.sdf)
+        self.declare_parameter('marker_size', 0.05)  # Size in meters (matching your model.sdf)
         self.declare_parameter('show_rejected', False)
         
         aruco_dict_name = self.get_parameter('aruco_dict').get_parameter_value().string_value
@@ -58,6 +60,13 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         
         # Track the number of detected markers to log only on changes
         self.last_marker_count = 0
+        # Avoid spamming TF warnings
+        self._warned_tf_failure = False
+        # Throttle per-frame console logging
+        self._last_log_time = 0.0
+        self.log_interval_s = 1.0
+        # Display scaling for larger window
+        self.display_scale = 2.0
         
         self.get_logger().info(f'ArUco detector initialized with dictionary: {aruco_dict_name}')
         self.get_logger().info(f'Marker size: {self.marker_size}m')
@@ -99,6 +108,36 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         
         return cv2.aruco.getPredefinedDictionary(dict_map[dict_name])
 
+    def _lookup_base_camera_transform(self):
+        """Resolve base->camera transform by trying common frame candidates.
+        Returns the `geometry_msgs/TransformStamped` if found, else raises.
+        """
+        candidates = ["ee_camera_link"]
+        """if self.camera_frame:
+            candidates.append(self.camera_frame)
+            # Try prefix + ee_camera_link and link_6 as fallbacks
+            model_prefix = self.camera_frame.split('/')[:1][0]
+            if model_prefix:
+                candidates.append(f"{model_prefix}/ee_camera_link")
+                candidates.append(f"{model_prefix}/link_6")
+        # Generic fallbacks
+        candidates.extend(["ee_camera_link", "link_6"])
+        """
+
+        for src in candidates:
+            try:
+                temp = self.tf_buffer.lookup_transform(
+                    self.base_link_name,  # target (base)
+                    src,                  # source (camera/link)
+                    Time()
+                )
+                #print(src)
+                return temp
+                
+            except Exception:
+                continue
+        raise RuntimeError("Unable to resolve base->camera transform from candidates: " + ", ".join(candidates))
+
     def _detect_aruco_markers(self, image: np.ndarray) -> tuple:
         """
         Detect ArUco markers in the image and draw them.
@@ -118,211 +157,166 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
             cv2.aruco.drawDetectedMarkers(output_image, corners, ids)
             
             # If we have camera calibration, estimate pose
-            if self.camera_matrix is not None and self.dist_coeffs is not None:
-                for i, corner in enumerate(corners):
-                    marker_id = ids[i][0]
-                    
-                    # Estimate pose of each marker (camera -> marker)
-                    rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(
-                        corner, self.marker_size, self.camera_matrix, self.dist_coeffs
-                    )
-                    
-                    # Extract position (translation vector)
-                    position_cam = tvec[0][0]  # [x, y, z] in meters (camera frame)
-                    distance = np.linalg.norm(position_cam)
-                    
-                    # Convert rotation vector to euler angles
-                    rotation_matrix, _ = cv2.Rodrigues(rvec[0])
-                    sy = np.sqrt(rotation_matrix[0, 0]**2 + rotation_matrix[1, 0]**2)
-                    singular = sy < 1e-6
-                    if not singular:
-                        roll = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
-                        pitch = np.arctan2(-rotation_matrix[2, 0], sy)
-                        yaw = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
-                    else:
-                        roll = np.arctan2(-rotation_matrix[1, 2], rotation_matrix[1, 1])
-                        pitch = np.arctan2(-rotation_matrix[2, 0], sy)
-                        yaw = 0
-                    
-                    roll_deg = np.degrees(roll)
-                    pitch_deg = np.degrees(pitch)
-                    yaw_deg = np.degrees(yaw)
+            for i, corner in enumerate(corners):
+                marker_id = ids[i][0]
+                
+                # Estimate pose of each marker (camera -> marker)
+                rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(
+                    corner, self.marker_size, self.camera_matrix, self.dist_coeffs
+                )
+                
+                # Extract position (translation vector)
+                position_cam = tvec[0][0]  # [x, y, z] in meters (camera frame)
+                distance = np.linalg.norm(position_cam)
+                
+                # Convert rotation vector to euler angles
+                rotation_matrix, _ = cv2.Rodrigues(rvec[0])
+                sy = np.sqrt(rotation_matrix[0, 0]**2 + rotation_matrix[1, 0]**2)
+                singular = sy < 1e-6
+                if not singular:
+                    roll = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
+                    pitch = np.arctan2(-rotation_matrix[2, 0], sy)
+                    yaw = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
+                else:
+                    roll = np.arctan2(-rotation_matrix[1, 2], rotation_matrix[1, 1])
+                    pitch = np.arctan2(-rotation_matrix[2, 0], sy)
+                    yaw = 0
+                
+                roll_deg = np.degrees(roll)
+                pitch_deg = np.degrees(pitch)
+                yaw_deg = np.degrees(yaw)
 
-                    # Compute base -> marker using TF (base -> camera) * (camera -> marker)
-                    position_base = None
-                    orientation_base = None
-                    if self.camera_frame and hasattr(self, 'base_link_name'):
-                        try:
-                            tf_bc = self.tf_buffer.lookup_transform(
-                                self.base_link_name,  # target (base)
-                                self.camera_frame,    # source (camera)
-                                Time()
+                # Compute base -> marker using TF (base -> camera) * (camera -> marker)
+                position_base = None
+                orientation_base = None
+                if hasattr(self, 'base_link_name'):
+                    try:
+                        # Get world -> base_link
+                        tf_wb = self.tf_buffer.lookup_transform("world", self.base_link_name, Time())
+                        # Get base_link -> camera
+                        tf_bc = self.tf_buffer.lookup_transform(self.base_link_name, "ee_camera_link", Time())
+
+                        # Convert both to matrices and combine: world->camera = world->base_link * base_link->camera
+                        # (You can use scipy.spatial.transform.Rotation and numpy for this)
+                        t_wb = np.array([
+                            tf_wb.transform.translation.x,
+                            tf_wb.transform.translation.y,
+                            tf_wb.transform.translation.z,
+                        ])
+                        q_wb = [
+                            tf_wb.transform.rotation.x,
+                            tf_wb.transform.rotation.y,
+                            tf_wb.transform.rotation.z,
+                            tf_wb.transform.rotation.w,
+                        ]
+                        R_wb = R.from_quat(q_wb).as_matrix()
+
+                        t_bc = np.array([
+                            tf_bc.transform.translation.x,
+                            tf_bc.transform.translation.y,
+                            tf_bc.transform.translation.z,
+                        ])
+                        q_bc = [
+                            tf_bc.transform.rotation.x,
+                            tf_bc.transform.rotation.y,
+                            tf_bc.transform.rotation.z,
+                            tf_bc.transform.rotation.w,
+                        ]
+                        R_bc = R.from_quat(q_bc).as_matrix()
+
+                        # Combined transform: world -> marker
+                        t_bm = t_wb + R_wb @ t_bc
+                        R_bm = R_wb @ R_bc
+                        rpy_bm = R.from_matrix(R_bm).as_euler('xyz', degrees=True)
+
+                        position_base = t_bm
+                        orientation_base = {
+                            'roll': float(rpy_bm[0]),
+                            'pitch': float(rpy_bm[1]),
+                            'yaw': float(rpy_bm[2]),
+                        }
+                    except Exception as e:
+                        # TF may be unavailable early; continue with camera frame only
+                        if not self._warned_tf_failure:
+                            self.get_logger().warn(f'Base->Camera TF lookup failed: {e}')
+                            self._warned_tf_failure = True
+                
+                # Store pose data for overlay
+                entry = {
+                    'id': marker_id,
+                    'position': position_cam,
+                    'orientation': {
+                        'roll': roll_deg,
+                        'pitch': pitch_deg,
+                        'yaw': yaw_deg
+                    },
+                    'distance': distance
+                }
+                if position_base is not None and orientation_base is not None:
+                    entry['position_base'] = position_base
+                    entry['orientation_base'] = orientation_base
+                    # Per-frame console log including base->marker and camera->marker
+                    try:
+                        now = time.monotonic()
+                        if now - self._last_log_time >= self.log_interval_s:
+                            self.get_logger().info(
+                                f"Marker {marker_id}: Base [x={position_base[0]:.3f}m, y={position_base[1]:.3f}m, z={position_base[2]:.3f}m] "
+                                f"R/P/Y [{orientation_base['roll']:.1f}°, {orientation_base['pitch']:.1f}°, {orientation_base['yaw']:.1f}°] | "
+                                f"Camera [x={position_cam[0]:.3f}m, y={position_cam[1]:.3f}m, z={position_cam[2]:.3f}m, dist={distance:.3f}m] "
+                                f"R/P/Y [{roll_deg:.1f}°, {pitch_deg:.1f}°, {yaw_deg:.1f}°]"
                             )
-                            t_bc = np.array([
-                                tf_bc.transform.translation.x,
-                                tf_bc.transform.translation.y,
-                                tf_bc.transform.translation.z,
-                            ])
-                            q_bc = [
-                                tf_bc.transform.rotation.x,
-                                tf_bc.transform.rotation.y,
-                                tf_bc.transform.rotation.z,
-                                tf_bc.transform.rotation.w,
-                            ]
-                            R_bc = R.from_quat(q_bc).as_matrix()
-                            t_cm = position_cam.reshape(3)
-                            R_cm = rotation_matrix
-
-                            t_bm = R_bc @ t_cm + t_bc
-                            R_bm = R_bc @ R_cm
-                            rpy_bm = R.from_matrix(R_bm).as_euler('xyz', degrees=True)
-
-                            position_base = t_bm
-                            orientation_base = {
-                                'roll': float(rpy_bm[0]),
-                                'pitch': float(rpy_bm[1]),
-                                'yaw': float(rpy_bm[2]),
-                            }
-                        except Exception as e:
-                            # TF may be unavailable early; continue with camera frame only
-                            if self.last_marker_count == 0:
-                                self.get_logger().warn(f'Base->Camera TF lookup failed: {e}')
-                    
-                    # Store pose data for overlay
-                    entry = {
-                        'id': marker_id,
-                        'position': position_cam,
-                        'orientation': {
-                            'roll': roll_deg,
-                            'pitch': pitch_deg,
-                            'yaw': yaw_deg
-                        },
-                        'distance': distance
-                    }
-                    if position_base is not None and orientation_base is not None:
-                        entry['position_base'] = position_base
-                        entry['orientation_base'] = orientation_base
-                    marker_poses.append(entry)
-                    
-                    # Draw axis for each marker
-                    cv2.drawFrameAxes(
-                        output_image, self.camera_matrix, self.dist_coeffs,
-                        rvec[0], tvec[0], self.marker_size * 0.5
-                    )
-                    
-                    # Display ID and distance near marker
-                    corner_center = corner[0].mean(axis=0).astype(int)
-                    
-                    cv2.putText(
-                        output_image,
-                        f"ID:{marker_id} D:{distance:.2f}m",
-                        tuple(corner_center + np.array([0, -10])),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 255, 0),
-                        2
-                    )
-            else:
-                # Just display marker IDs without pose estimation
-                for i, corner in enumerate(corners):
-                    marker_id = ids[i][0]
-                    corner_center = corner[0].mean(axis=0).astype(int)
-                    
-                    cv2.putText(
-                        output_image,
-                        f"ID:{marker_id}",
-                        tuple(corner_center),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 255, 0),
-                        2
-                    )
+                            self._last_log_time = now
+                    except Exception:
+                        pass
+                marker_poses.append(entry)
+                
+                # Draw axis for each marker
+                cv2.drawFrameAxes(
+                    output_image, self.camera_matrix, self.dist_coeffs,
+                    rvec[0], tvec[0], self.marker_size * 0.5
+                )
+                
+                # Display ID and distance near marker
+                corner_center = corner[0].mean(axis=0).astype(int)
+                
+                cv2.putText(
+                    output_image,
+                    f"ID:{marker_id} D:{distance:.2f}m",
+                    tuple(corner_center + np.array([0, -10])),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    2
+                )
+            
             
             # Only log when the number of markers changes
             current_marker_count = len(ids)
             if current_marker_count != self.last_marker_count:
                 marker_ids = ids.flatten().tolist()
                 self.get_logger().info(f'Detected {current_marker_count} ArUco marker(s): {marker_ids}')
-                
-                # Log pose information if camera is calibrated
-                if self.camera_matrix is not None and self.dist_coeffs is not None:
-                    for i, corner in enumerate(corners):
-                        marker_id = ids[i][0]
-                        # Estimate pose of each marker
-                        rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(
-                            corner, self.marker_size, self.camera_matrix, self.dist_coeffs
+                # Log pose information using already computed marker_poses
+                for entry in marker_poses:
+                    marker_id = entry['id']
+                    position_cam = entry['position']
+                    orientation = entry['orientation']
+                    distance = entry['distance']
+                    if 'position_base' in entry and 'orientation_base' in entry:
+                        pb = entry['position_base']
+                        ob = entry['orientation_base']
+                        self.get_logger().info(
+                            f'  Marker {marker_id}: Camera [x={position_cam[0]:.3f}m, y={position_cam[1]:.3f}m, z={position_cam[2]:.3f}m, dist={distance:.3f}m] '
+                            f'R/P/Y [{orientation['roll']:.1f}°, {orientation['pitch']:.1f}°, {orientation['yaw']:.1f}°] | '
+                            f'Base [x={pb[0]:.3f}m, y={pb[1]:.3f}m, z={pb[2]:.3f}m] '
+                            f'R/P/Y [{ob['roll']:.1f}°, {ob['pitch']:.1f}°, {ob['yaw']:.1f}°]'
                         )
-                        
-                        # Extract position (translation vector)
-                        position_cam = tvec[0][0]  # [x, y, z] in meters (camera)
-                        
-                        # Convert rotation vector to euler angles for easier interpretation
-                        rotation_matrix, _ = cv2.Rodrigues(rvec[0])
-                        # Extract euler angles (roll, pitch, yaw) in degrees
-                        sy = np.sqrt(rotation_matrix[0, 0]**2 + rotation_matrix[1, 0]**2)
-                        singular = sy < 1e-6
-                        if not singular:
-                            roll = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
-                            pitch = np.arctan2(-rotation_matrix[2, 0], sy)
-                            yaw = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
-                        else:
-                            roll = np.arctan2(-rotation_matrix[1, 2], rotation_matrix[1, 1])
-                            pitch = np.arctan2(-rotation_matrix[2, 0], sy)
-                            yaw = 0
-                        
-                        roll_deg = np.degrees(roll)
-                        pitch_deg = np.degrees(pitch)
-                        yaw_deg = np.degrees(yaw)
-                        
-                        distance = np.linalg.norm(position_cam)
-                        
-                        # Also try base->marker if TF available
-                        if self.camera_frame and hasattr(self, 'base_link_name'):
-                            try:
-                                tf_bc = self.tf_buffer.lookup_transform(
-                                    self.base_link_name,
-                                    self.camera_frame,
-                                    Time()
-                                )
-                                t_bc = np.array([
-                                    tf_bc.transform.translation.x,
-                                    tf_bc.transform.translation.y,
-                                    tf_bc.transform.translation.z,
-                                ])
-                                q_bc = [
-                                    tf_bc.transform.rotation.x,
-                                    tf_bc.transform.rotation.y,
-                                    tf_bc.transform.rotation.z,
-                                    tf_bc.transform.rotation.w,
-                                ]
-                                R_bc = R.from_quat(q_bc).as_matrix()
-                                t_cm = position_cam.reshape(3)
-                                R_cm = rotation_matrix
-                                t_bm = R_bc @ t_cm + t_bc
-                                R_bm = R_bc @ R_cm
-                                rpy_bm = R.from_matrix(R_bm).as_euler('xyz', degrees=True)
-                                self.get_logger().info(
-                                    f'  Marker {marker_id}: Camera [x={position_cam[0]:.3f}m, y={position_cam[1]:.3f}m, z={position_cam[2]:.3f}m, dist={distance:.3f}m] '
-                                    f'R/P/Y [{roll_deg:.1f}°, {pitch_deg:.1f}°, {yaw_deg:.1f}°] | '
-                                    f'Base [x={t_bm[0]:.3f}m, y={t_bm[1]:.3f}m, z={t_bm[2]:.3f}m] '
-                                    f'R/P/Y [{rpy_bm[0]:.1f}°, {rpy_bm[1]:.1f}°, {rpy_bm[2]:.1f}°]'
-                                )
-                            except Exception:
-                                self.get_logger().info(
-                                    f'  Marker {marker_id}: '
-                                    f'Camera [x={position_cam[0]:.3f}m, y={position_cam[1]:.3f}m, z={position_cam[2]:.3f}m, dist={distance:.3f}m] '
-                                    f'R/P/Y [{roll_deg:.1f}°, {pitch_deg:.1f}°, {yaw_deg:.1f}°]'
-                                )
-                        else:
-                            self.get_logger().info(
-                                f'  Marker {marker_id}: '
-                                f'Camera [x={position_cam[0]:.3f}m, y={position_cam[1]:.3f}m, z={position_cam[2]:.3f}m, dist={distance:.3f}m] '
-                                f'R/P/Y [{roll_deg:.1f}°, {pitch_deg:.1f}°, {yaw_deg:.1f}°]'
-                            )
-                else:
-                    self.get_logger().warn('  Camera not calibrated - pose estimation unavailable')
-                
-                self.last_marker_count = current_marker_count
+                    else:
+                        self.get_logger().info(
+                            f'  Marker {marker_id}: '
+                            f'Camera [x={position_cam[0]:.3f}m, y={position_cam[1]:.3f}m, z={position_cam[2]:.3f}m, dist={distance:.3f}m] '
+                            f'R/P/Y [{orientation['roll']:.1f}°, {orientation['pitch']:.1f}°, {orientation['yaw']:.1f}°]'
+                        )
+
         else:
             # Log when markers disappear
             if self.last_marker_count > 0:
@@ -359,99 +353,123 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         if len(depth_vis.shape) == 2:
             depth_vis = cv2.cvtColor(depth_vis, cv2.COLOR_GRAY2BGR)
 
-        # Add pose information overlay on the color image
-        self._draw_pose_overlay(color_with_markers, marker_poses)
-
+        # Compose side-by-side video feed
         combined = np.hstack([color_with_markers, depth_vis])
-        
-        # Add instruction text
-        cv2.putText(combined, "Press 'q' to quit", (10, 30),
+
+        # Create a separate text panel and draw info below the video feed
+        panel_height = max(160, 40 + len(marker_poses) * 160)
+        text_panel = np.zeros((panel_height, combined.shape[1], 3), dtype=np.uint8)
+        self._draw_pose_overlay(text_panel, marker_poses)
+
+        # Stack video feed above text panel
+        final_frame = np.vstack([combined, text_panel])
+
+        # Add instruction text on the final frame
+        cv2.putText(final_frame, "Press 'q' to quit", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        cv2.imshow('RGB with ArUco (left) + Depth (right)', combined)
+
+        # Scale up display for readability
+        if self.display_scale and self.display_scale != 1.0:
+            frame_to_show = cv2.resize(
+                final_frame, None, fx=self.display_scale, fy=self.display_scale,
+                interpolation=cv2.INTER_LINEAR
+            )
+        else:
+            frame_to_show = final_frame
+
+        cv2.imshow('RGB with ArUco (top) + Text (bottom)', frame_to_show)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             self.get_logger().info('Quit key pressed, shutting down...')
             rclpy.shutdown()
     
+
     def _draw_pose_overlay(self, image: np.ndarray, marker_poses: list):
-        """Draw 6 DOF pose information as overlay on the image."""
+        """Draw camera→marker, base→marker, and end effector pose in the text panel."""
+        y_offset = 18  # Start a bit lower for top margin
+        line_height = 14  # Reduced line height for tighter spacing
+
         if not marker_poses:
-            # Display message when no markers detected
-            cv2.putText(image, "No markers detected", (10, 60),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            return
-        
-        # Starting position for text overlay
-        y_offset = 60
-        line_height = 25
-        
+            cv2.putText(image, "No markers detected", (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            y_offset += line_height
+
         for pose_data in marker_poses:
             marker_id = pose_data['id']
             position = pose_data['position']
             orientation = pose_data['orientation']
             distance = pose_data['distance']
-            
-            # Create semi-transparent background for text
-            overlay = image.copy()
-            cv2.rectangle(overlay, (5, y_offset - 20), (400, y_offset + line_height * 6 + 5), 
-                         (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.6, image, 0.4, 0, image)
-            
-            # Display marker ID and distance
-            cv2.putText(image, f"Marker ID: {marker_id}", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            y_offset += line_height
-            
-            cv2.putText(image, f"Distance: {distance:.3f} m", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            y_offset += line_height
-            
-            # Position (Translation) — camera frame
-            cv2.putText(image, f"Position (m):", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
-            y_offset += line_height
-            
-            cv2.putText(image, f"  Cam X: {position[0]:+.3f}  Y: {position[1]:+.3f}  Z: {position[2]:+.3f}", 
-                       (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            y_offset += line_height
-            
-            # Orientation (Rotation) — camera frame
-            cv2.putText(image, f"Orientation (deg):", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
-            y_offset += line_height
-            
-            cv2.putText(image, 
-                       f"  R: {orientation['roll']:+.1f}  P: {orientation['pitch']:+.1f}  Y: {orientation['yaw']:+.1f}", 
-                       (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            y_offset += line_height + 10
 
-            # If base-frame data available, show it too
+            # Camera→marker
+            cv2.putText(image, f"Marker {marker_id} (Camera→Marker):", (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            y_offset += line_height
+            cv2.putText(image, f"  Pos: X={position[0]:+.3f} Y={position[1]:+.3f} Z={position[2]:+.3f}  Dist={distance:.3f}m", (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            y_offset += line_height
+            cv2.putText(image, f"  RPY: R={orientation['roll']:+.1f}° P={orientation['pitch']:+.1f}° Y={orientation['yaw']:+.1f}°", (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            y_offset += line_height
+
+            # Base→marker
             if 'position_base' in pose_data and 'orientation_base' in pose_data:
                 pb = pose_data['position_base']
                 ob = pose_data['orientation_base']
-                cv2.putText(image, f"Base Position (m):", (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
+                cv2.putText(image, f"  (Base→Marker):", (10, y_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 2)
                 y_offset += line_height
-                cv2.putText(image, f"  X: {pb[0]:+.3f}  Y: {pb[1]:+.3f}  Z: {pb[2]:+.3f}",
-                           (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(image, f"    Pos: X={pb[0]:+.3f} Y={pb[1]:+.3f} Z={pb[2]:+.3f}", (10, y_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 y_offset += line_height
-                cv2.putText(image, f"Base Orientation (deg):", (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
+                cv2.putText(image, f"    RPY: R={ob['roll']:+.1f}° P={ob['pitch']:+.1f}° Y={ob['yaw']:+.1f}°", (10, y_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 y_offset += line_height
-                cv2.putText(image,
-                           f"  R: {ob['roll']:+.1f}  P: {ob['pitch']:+.1f}  Y: {ob['yaw']:+.1f}",
-                           (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                y_offset += line_height + 10
+
+            y_offset += 2  # Small gap between markers
+
+        # Show last known end effector pose from PoseReader
+        y_offset += 10
+        cv2.putText(image, "End Effector Pose (from FK):", (10, y_offset),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
+        y_offset += line_height
+        try:
+            p = self.pose  # [x, y, z, roll, pitch, yaw]
+            q = self.quat  # [qx, qy, qz, qw]
+            cv2.putText(image, f"  Pos: X={p[0]:+.3f} Y={p[1]:+.3f} Z={p[2]:+.3f}", (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            y_offset += line_height
+            cv2.putText(image, f"  RPY: R={p[3]:+.1f}° P={p[4]:+.1f}° Y={p[5]:+.1f}°", (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            y_offset += line_height
+            cv2.putText(image, f"  Quat: x={q[0]:+.3f} y={q[1]:+.3f} z={q[2]:+.3f} w={q[3]:+.3f}", (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        except Exception:
+            cv2.putText(image, "  (No pose available)", (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = ArucoDetectionViewer()
+    def spawn_aruco_marker(n: Node):
+        cmd = [
+            'ros2', 'run', 'ros_gz_sim', 'create',
+            '-file', '/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf',
+            '-name', 'aruco_marker',
+            '-x', '-0.6', '-y', '0', '-z', '0.4',
+            '-R', '0', '-P', '0', '-Y', '0'
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            msg = result.stdout.strip() or 'Spawn command executed successfully'
+            n.get_logger().info(f'Aruco spawn: {msg}')
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or e.stdout or str(e)).strip()
+            n.get_logger().error(f'Aruco spawn failed: {err}')
+        except Exception as e:
+            n.get_logger().error(f'Aruco spawn exception: {e}')
+
+    spawn_aruco_marker(node)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

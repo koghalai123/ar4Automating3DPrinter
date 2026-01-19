@@ -24,7 +24,7 @@ from moveit2 import MoveIt2
 class PoseReader(Node):
 	"""ROS 2 node that prints the gripper pose every second using pymoveit2."""
 
-	def __init__(self, node_name: Optional[str] = None):
+	def __init__(self, node_name: Optional[str] = None, enable_pose_print: bool = True):
 		super().__init__(node_name or "gripper_pose_reader")
 
 		# Robot specifics (AR4 / MoveIt config defaults)
@@ -65,6 +65,7 @@ class PoseReader(Node):
 		self.quat = np.array([-1, -1, -1, -1])
 		self.frame = ""
 
+		self.enable_pose_print = enable_pose_print
 
 		self.create_subscription(
 			JointState,
@@ -73,8 +74,8 @@ class PoseReader(Node):
 			10,
 		)
         
-		# Periodic timer to print pose
-		self._timer = self.create_timer(2.0, self._on_timer)
+		# Always update pose every 0.5s, but only print if enabled
+		self._timer = self.create_timer(0.5, self._on_timer)
 
 		self.get_logger().info(
 			f"PoseReader started; base='{base_link_name}', eef='{end_effector_name}'"
@@ -141,13 +142,15 @@ class PoseReader(Node):
 		if not self._last_joint_msg:
 			self.get_logger().warn("Waiting for joint_states...")
 			return
-		# Call the synchronous FK version for immediate results
+		# Always update pose
 		self.get_fk()
-		print(
-			f"[GripperPose] frame={self.frame} pos=({self.pose[0]:.4f}, {self.pose[1]:.4f}, {self.pose[2]:.4f}) "
-			f"quat=({self.quat[0]:.4f}, {self.quat[1]:.4f}, {self.quat[2]:.4f}, {self.quat[3]:.4f}) "
-			f"rpy=({self.pose[3]:.4f}, {self.pose[4]:.4f}, {self.pose[5]:.4f})"
-		)
+		# Only print if enabled
+		if self.enable_pose_print:
+			print(
+				f"[GripperPose] frame={self.frame} pos=({self.pose[0]:.4f}, {self.pose[1]:.4f}, {self.pose[2]:.4f}) "
+				f"quat=({self.quat[0]:.4f}, {self.quat[1]:.4f}, {self.quat[2]:.4f}, {self.quat[3]:.4f}) "
+				f"rpy=({self.pose[3]:.4f}, {self.pose[4]:.4f}, {self.pose[5]:.4f})"
+			)
 
 
 def main(argv=None):
