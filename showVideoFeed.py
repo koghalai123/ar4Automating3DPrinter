@@ -9,8 +9,8 @@ import numpy as np
 
 
 class CameraViewer(Node):
-    def __init__(self):
-        super().__init__('camera_viewer')
+    def __init__(self, node_name: str = None):
+        super().__init__(node_name or 'camera_viewer')
 
         self.declare_parameter('color_topic', '/rgbd_camera/image')
         self.declare_parameter('depth_topic', '/rgbd_camera/depth_image')
