@@ -17,10 +17,11 @@ from showVideoFeed import CameraViewer
 from poseReader import PoseReader
 from rclpy.time import Time
 import tf2_ros
+import time
+
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import subprocess
-import time
 
 
 class ArucoDetectionViewer(PoseReader, CameraViewer):
