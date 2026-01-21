@@ -2,7 +2,7 @@
 # export GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models
 # ros2 run ros_gz_sim create -file /home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf -name aruco_marker -x -0.6 -y 0 -z 0.4 -R 0 -P 0 -Y 0
 
-
+#To view frames: ros2 run tf2_tools view_frames
 
 
 
@@ -15,14 +15,9 @@ from cv_bridge import CvBridge
 import cv2
 from showVideoFeed import CameraViewer
 from poseReader import PoseReader
-from rclpy.time import Time
-import tf2_ros
-import time
-
-from scipy.spatial.transform import Rotation as R
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 import subprocess
-
 
 class ArucoDetectionViewer(PoseReader, CameraViewer):
     """
@@ -37,6 +32,9 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         self.declare_parameter('marker_size', 0.05)  # Size in meters (matching your model.sdf)
         self.declare_parameter('show_rejected', False)
         
+        # Declare calibration mode parameter
+        self.declare_parameter('calibration_mode', True)
+        
         aruco_dict_name = self.get_parameter('aruco_dict').get_parameter_value().string_value
         self.marker_size = self.get_parameter('marker_size').get_parameter_value().double_value
         self.show_rejected = self.get_parameter('show_rejected').get_parameter_value().bool_value
@@ -50,10 +48,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         self.dist_coeffs = None
         self.camera_frame = None
 
-        # TF buffer/listener to get base->camera transform
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-        
+
         # Subscribe to camera info for calibration parameters
         self.camera_info_sub = self.create_subscription(
             CameraInfo, '/rgbd_camera/camera_info', self.camera_info_callback, 10
@@ -77,8 +72,8 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         if self.camera_matrix is None:
             self.camera_matrix = np.array(msg.k).reshape(3, 3)
             self.dist_coeffs = np.array(msg.d)
-            # Remember camera frame for TF lookup
-            self.camera_frame = msg.header.frame_id or 'rgbd_camera'
+            # Hardcode to the correct camera frame as per user confirmation
+            self.camera_frame = "ee_camera_link"
             self.get_logger().info(f'Camera calibration parameters received (frame: {self.camera_frame})')
 
     def _get_aruco_dict(self, dict_name: str):
@@ -110,34 +105,36 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         return cv2.aruco.getPredefinedDictionary(dict_map[dict_name])
 
     def _lookup_base_camera_transform(self):
-        """Resolve base->camera transform by trying common frame candidates.
-        Returns the `geometry_msgs/TransformStamped` if found, else raises.
         """
-        candidates = ["ee_camera_link"]
-        """if self.camera_frame:
-            candidates.append(self.camera_frame)
-            # Try prefix + ee_camera_link and link_6 as fallbacks
-            model_prefix = self.camera_frame.split('/')[:1][0]
-            if model_prefix:
-                candidates.append(f"{model_prefix}/ee_camera_link")
-                candidates.append(f"{model_prefix}/link_6")
-        # Generic fallbacks
-        candidates.extend(["ee_camera_link", "link_6"])
+        Get the camera pose in the world frame using PoseReader's get_frame method.
+        Returns a tuple: (position, euler_angles)
         """
+        # Use the camera frame if available, otherwise default to 'ee_camera_link'
+        frame = self.camera_frame if self.camera_frame else "ee_camera_link"
+        pose = self.get_frame(frame)
+        position = pose[:3]
+        euler_angles = pose[3:]
+        return position, euler_angles
 
-        for src in candidates:
-            try:
-                temp = self.tf_buffer.lookup_transform(
-                    self.base_link_name,  # target (base)
-                    src,                  # source (camera/link)
-                    Time()
-                )
-                #print(src)
-                return temp
-                
-            except Exception:
-                continue
-        raise RuntimeError("Unable to resolve base->camera transform from candidates: " + ", ".join(candidates))
+    def pose_to_homogeneous_matrix(self, position, euler_angles):
+        """
+        Convert position and Euler angles to a 4x4 homogeneous transformation matrix.
+        Args:
+            position: [x, y, z] list or array
+            euler_angles: [roll, pitch, yaw] in radians, 'XYZ' order
+        Returns:
+            4x4 numpy array (homogeneous matrix)
+        """
+        # Create rotation matrix from Euler angles
+        rot = R.from_euler('XYZ', euler_angles, degrees=False)
+        rotation_matrix = rot.as_matrix()
+        
+        # Create homogeneous matrix
+        homogeneous_matrix = np.eye(4)
+        homogeneous_matrix[:3, :3] = rotation_matrix
+        homogeneous_matrix[:3, 3] = position
+        
+        return homogeneous_matrix
 
     def _detect_aruco_markers(self, image: np.ndarray) -> tuple:
         """
@@ -153,6 +150,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         output_image = image.copy()
         marker_poses = []
         
+
         if ids is not None and len(ids) > 0:
             # Draw all detected markers
             cv2.aruco.drawDetectedMarkers(output_image, corners, ids)
@@ -170,105 +168,76 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                 position_cam = tvec[0][0]  # [x, y, z] in meters (camera frame)
                 distance = np.linalg.norm(position_cam)
                 
-                # Convert rotation vector to euler angles
+                # Convert rotation vector to euler angles (radians)
                 rotation_matrix, _ = cv2.Rodrigues(rvec[0])
-                sy = np.sqrt(rotation_matrix[0, 0]**2 + rotation_matrix[1, 0]**2)
-                singular = sy < 1e-6
-                if not singular:
-                    roll = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
-                    pitch = np.arctan2(-rotation_matrix[2, 0], sy)
-                    yaw = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
-                else:
-                    roll = np.arctan2(-rotation_matrix[1, 2], rotation_matrix[1, 1])
-                    pitch = np.arctan2(-rotation_matrix[2, 0], sy)
-                    yaw = 0
+                rot = R.from_matrix(rotation_matrix)
+                roll, pitch, yaw = rot.as_euler('XYZ', degrees=False)
+                euler_cam = np.array([roll, pitch, yaw])
                 
-                roll_deg = np.degrees(roll)
-                pitch_deg = np.degrees(pitch)
-                yaw_deg = np.degrees(yaw)
+                # Get camera pose in base frame using get_frame
+                camera_pos, camera_euler = self._lookup_base_camera_transform()
+                
+                # Check if calibration mode is enabled and not yet calibrated
+                calibration_mode = self.get_parameter('calibration_mode').get_parameter_value().bool_value
+                if calibration_mode:
+                    HTM_camera = self.pose_to_homogeneous_matrix(camera_pos, camera_euler)
+                    HTM_marker_cam = self.pose_to_homogeneous_matrix(position_cam, euler_cam)
 
-                # Compute base -> marker using TF (base -> camera) * (camera -> marker)
-                position_base = None
-                orientation_base = None
-                if hasattr(self, 'base_link_name'):
-                    try:
-                        # Get world -> base_link
-                        tf_wb = self.tf_buffer.lookup_transform("world", self.base_link_name, Time())
-                        # Get base_link -> camera
-                        tf_bc = self.tf_buffer.lookup_transform(self.base_link_name, "ee_camera_link", Time())
+                    self.get_logger().info('Calibration mode: Logging marker poses for all offset combinations (pi/2 increments)')
+                    # Possible offsets: 0, 90°, 180°, 270° (in radians)
+                    offsets = [0, np.pi/2, np.pi, 3*np.pi/2]
+                    for roll_offset in offsets:
+                        for pitch_offset in offsets:
+                            for yaw_offset in offsets:
+                                offset = np.array([roll_offset, pitch_offset, yaw_offset])
+                                camera_euler_offset = camera_euler + offset
+                                # Create HTMs
+                                HTM_camera = self.pose_to_homogeneous_matrix(camera_pos, camera_euler_offset)
+                                HTM_marker_base = HTM_camera @ HTM_marker_cam
+                                position_base = HTM_marker_base[:3, 3]
+                                rot_base = R.from_matrix(HTM_marker_base[:3, :3])
+                                rpy_base = rot_base.as_euler('XYZ', degrees=True)
+                                self.get_logger().info(
+                                    f'Offset [{np.degrees(roll_offset):.0f}°, {np.degrees(pitch_offset):.0f}°, {np.degrees(yaw_offset):.0f}°]: '
+                                    f'Pos [{position_base[0]:.3f}, {position_base[1]:.3f}, {position_base[2]:.3f}], '
+                                    f'RPY [{rpy_base[0]:.1f}°, {rpy_base[1]:.1f}°, {rpy_base[2]:.1f}°]'
+                                )
+                    self.get_logger().info('Calibration complete. Disable calibration_mode and set the chosen offset manually.')
+                
+                # Use fixed offset (update this with the chosen calibration result)
+                camera_euler = camera_euler + np.array([np.pi, np.pi, np.pi])  # Replace with calibrated values, e.g., np.array([0, np.pi, 0])
+                
+                # Create HTMs
+                HTM_camera = self.pose_to_homogeneous_matrix(camera_pos, camera_euler)
+                HTM_marker_cam = self.pose_to_homogeneous_matrix(position_cam, euler_cam)
 
-                        # Convert both to matrices and combine: world->camera = world->base_link * base_link->camera
-                        # (You can use scipy.spatial.transform.Rotation and numpy for this)
-                        t_wb = np.array([
-                            tf_wb.transform.translation.x,
-                            tf_wb.transform.translation.y,
-                            tf_wb.transform.translation.z,
-                        ])
-                        q_wb = [
-                            tf_wb.transform.rotation.x,
-                            tf_wb.transform.rotation.y,
-                            tf_wb.transform.rotation.z,
-                            tf_wb.transform.rotation.w,
-                        ]
-                        R_wb = R.from_quat(q_wb).as_matrix()
+                # Transform marker to base frame
+                HTM_marker_base = HTM_camera @ HTM_marker_cam
+                position_base = HTM_marker_base[:3, 3]
+                rot_base = R.from_matrix(HTM_marker_base[:3, :3])
+                rpy_base = rot_base.as_euler('XYZ', degrees=True)
 
-                        t_bc = np.array([
-                            tf_bc.transform.translation.x,
-                            tf_bc.transform.translation.y,
-                            tf_bc.transform.translation.z,
-                        ])
-                        q_bc = [
-                            tf_bc.transform.rotation.x,
-                            tf_bc.transform.rotation.y,
-                            tf_bc.transform.rotation.z,
-                            tf_bc.transform.rotation.w,
-                        ]
-                        R_bc = R.from_quat(q_bc).as_matrix()
 
-                        # Combined transform: world -> marker
-                        t_bm = t_wb + R_wb @ t_bc
-                        R_bm = R_wb @ R_bc
-                        rpy_bm = R.from_matrix(R_bm).as_euler('xyz', degrees=True)
-
-                        position_base = t_bm
-                        orientation_base = {
-                            'roll': float(rpy_bm[0]),
-                            'pitch': float(rpy_bm[1]),
-                            'yaw': float(rpy_bm[2]),
-                        }
-                    except Exception as e:
-                        # TF may be unavailable early; continue with camera frame only
-                        if not self._warned_tf_failure:
-                            self.get_logger().warn(f'Base->Camera TF lookup failed: {e}')
-                            self._warned_tf_failure = True
+                orientation_base = {
+                    'roll': float(rpy_base[0]),
+                    'pitch': float(rpy_base[1]),
+                    'yaw': float(rpy_base[2]),
+                }
                 
                 # Store pose data for overlay
                 entry = {
                     'id': marker_id,
                     'position': position_cam,
                     'orientation': {
-                        'roll': roll_deg,
-                        'pitch': pitch_deg,
-                        'yaw': yaw_deg
+                        'roll': np.degrees(roll),
+                        'pitch': np.degrees(pitch),
+                        'yaw': np.degrees(yaw)
                     },
-                    'distance': distance
+                    'distance': distance,
+                    'position_base': position_base,
+                    'orientation_base': orientation_base
                 }
-                if position_base is not None and orientation_base is not None:
-                    entry['position_base'] = position_base
-                    entry['orientation_base'] = orientation_base
-                    # Per-frame console log including base->marker and camera->marker
-                    try:
-                        now = time.monotonic()
-                        if now - self._last_log_time >= self.log_interval_s:
-                            self.get_logger().info(
-                                f"Marker {marker_id}: Base [x={position_base[0]:.3f}m, y={position_base[1]:.3f}m, z={position_base[2]:.3f}m] "
-                                f"R/P/Y [{orientation_base['roll']:.1f}°, {orientation_base['pitch']:.1f}°, {orientation_base['yaw']:.1f}°] | "
-                                f"Camera [x={position_cam[0]:.3f}m, y={position_cam[1]:.3f}m, z={position_cam[2]:.3f}m, dist={distance:.3f}m] "
-                                f"R/P/Y [{roll_deg:.1f}°, {pitch_deg:.1f}°, {yaw_deg:.1f}°]"
-                            )
-                            self._last_log_time = now
-                    except Exception:
-                        pass
+                
                 marker_poses.append(entry)
                 
                 # Draw axis for each marker
@@ -317,7 +286,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                             f'Camera [x={position_cam[0]:.3f}m, y={position_cam[1]:.3f}m, z={position_cam[2]:.3f}m, dist={distance:.3f}m] '
                             f'R/P/Y [{orientation['roll']:.1f}°, {orientation['pitch']:.1f}°, {orientation['yaw']:.1f}°]'
                         )
-
+               
         else:
             # Log when markers disappear
             if self.last_marker_count > 0:
