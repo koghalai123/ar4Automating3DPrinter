@@ -11,13 +11,16 @@ from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import JointState
 import numpy as np
 from scipy.spatial.transform import Rotation as R
+from geometry_msgs.msg import Point, Quaternion, Pose
+from tf_transformations import quaternion_from_euler, euler_from_quaternion
+
 import math
 
 import tf2_ros
 from rclpy.time import Time
 
 def quat_to_euler(x: float, y: float, z: float, w: float):
-	roll, pitch, yaw = R.from_quat([x, y, z, w]).as_euler("xyz", degrees=False)
+	roll, pitch, yaw = R.from_quat([x, y, z, w]).as_euler("XYZ", degrees=False)
 	return roll, pitch, yaw
 
 import sys
@@ -84,18 +87,28 @@ class PoseReader(Node):
 		self.get_logger().info(
 			f"PoseReader started; base='{base_link_name}', eef='{end_effector_name}'"
 		)
-		self.frameAngles = np.array([0, 0, np.pi/2])  # Rotation from Bad Frame to Good Frame
+		self.frameRotationAngles = np.array([0, 0, np.pi/2])  # Rotation from Bad Frame to Good Frame
+		self.frameOffsetAngles = np.array([-0.6162, -1.5706, -2.1870])  # No translation offset
+
+	def move_to_pose(self, pos, euler):
+
+		bad_pos, bad_euler = self.to_bad_frame(pos, euler)
+		q = quaternion_from_euler(bad_euler[0], bad_euler[1], bad_euler[2])
+		q_msg = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
+		self.moveit2.move_to_pose(position=Point(x=bad_pos[0], y=bad_pos[1], z=bad_pos[2]), quat_xyzw=q_msg)
+		self.moveit2.wait_until_executed()
+
 
 	def to_good_frame(self, bad_position, bad_euler_angles):
 		# Transformation from Bad Frame to Good Frame (BF to GF)
 
-		R_BF_GF_Vec = R.from_euler('XYZ', self.frameAngles, degrees=False)
+		R_BF_GF_Vec = R.from_euler("XYZ", self.frameRotationAngles, degrees=False)
 		R_BF_GF = R_BF_GF_Vec.as_matrix()
 		H_BF_GF = np.eye(4)
 		H_BF_GF[:3, :3] = R_BF_GF
 
 		# Create rotation matrix from Euler angles
-		RBadFrameVec = R.from_euler('XYZ', bad_euler_angles, degrees=False)
+		RBadFrameVec = R.from_euler("XYZ", bad_euler_angles, degrees=False)
 		RBadFrame = RBadFrameVec.as_matrix()
 		HBadFrame = np.eye(4)
 		HBadFrame[:3, :3] = RBadFrame
@@ -104,10 +117,12 @@ class PoseReader(Node):
 		HGoodFrame = H_BF_GF @ HBadFrame
 		good_position = HGoodFrame[:3, 3]
 
-		# Extract rotation matrix and convert to Euler angles ('XYZ' order)
+		# Extract rotation matrix and convert to Euler angles ("XYZ" order)
 		good_euler_angles_vec = R.from_matrix(HGoodFrame[:3, :3])
-		good_euler_angles = good_euler_angles_vec.as_euler('XYZ', degrees=False)
 
+
+		good_euler_angles = good_euler_angles_vec.as_euler("XYZ", degrees=False)
+		good_euler_angles -= self.frameOffsetAngles
 
 		return good_position, good_euler_angles
 
@@ -116,18 +131,20 @@ class PoseReader(Node):
 		Inverse transformation: from Good Frame back to Bad Frame.
 		Args:
 			good_position: np.array([x, y, z]) in Good Frame
-			good_euler_angles: np.array([roll, pitch, yaw]) in Good Frame ('XYZ' order)
+			good_euler_angles: np.array([roll, pitch, yaw]) in Good Frame ("XYZ" order)
 		Returns:
 			bad_position, bad_euler_angles in Bad Frame
 		"""
 		# Inverse rotation from Good Frame to Bad Frame
-		R_GF_BF_Vec = R.from_euler('XYZ', -self.frameAngles, degrees=False)
-		R_GF_BF = R_GF_BF_Vec.as_matrix()
+		R_BF_GF_Vec = R.from_euler("XYZ", self.frameRotationAngles, degrees=False)
+		R_GF_BF = R_BF_GF_Vec.as_matrix().T
 		H_GF_BF = np.eye(4)
 		H_GF_BF[:3, :3] = R_GF_BF
 
 		# Create rotation matrix from Euler angles in Good Frame
-		RGoodFrameVec = R.from_euler('XYZ', good_euler_angles, degrees=False)
+		# Add back the offset angles that were subtracted in to_good_frame
+		good_euler_angles_corrected = good_euler_angles + self.frameOffsetAngles
+		RGoodFrameVec = R.from_euler("XYZ", good_euler_angles_corrected, degrees=False)
 		RGoodFrame = RGoodFrameVec.as_matrix()
 		HGoodFrame = np.eye(4)
 		HGoodFrame[:3, :3] = RGoodFrame
@@ -137,10 +154,9 @@ class PoseReader(Node):
 		HBadFrame = H_GF_BF @ HGoodFrame
 		bad_position = HBadFrame[:3, 3]
 
-		# Extract rotation matrix and convert to Euler angles ('XYZ' order)
+		# Extract rotation matrix and convert to Euler angles ("XYZ" order)
 		bad_euler_angles_vec = R.from_matrix(HBadFrame[:3, :3])
-		bad_euler_angles = bad_euler_angles_vec.as_euler('XYZ', degrees=False)
-
+		bad_euler_angles = bad_euler_angles_vec.as_euler("XYZ", degrees=False)
 		return bad_position, bad_euler_angles
 
 
@@ -158,11 +174,16 @@ class PoseReader(Node):
 			return
 	
 	def get_frame(self, frame = "ee_link"):
-		temp = self.tf_buffer.lookup_transform(
-			"world",  # target (base)
-			frame,                  # source (camera/link)
-			Time()
-		)
+		try:
+			temp = self.tf_buffer.lookup_transform(
+				"world",  # target (base)
+				frame,                  # source (camera/link)
+				Time()
+			)
+		except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+			self.get_logger().warn(f"TF Error: {e}")
+			return self.pose
+
 		position = temp.transform.translation
 		x, y, z = position.x, position.y, position.z
 		
@@ -175,9 +196,9 @@ class PoseReader(Node):
 
 		good_pos, good_euler = self.to_good_frame(np.array([x, y, z]), np.array([roll, pitch, yaw]))
 
-		#bad_pos, bad_euler = self.to_bad_frame(good_pos, good_euler)
+		bad_pos, bad_euler = self.to_bad_frame(good_pos, good_euler)
 		goodPose = np.array([good_pos[0], good_pos[1], good_pos[2], good_euler[0], good_euler[1], good_euler[2]])
-		#badPose = np.array([bad_pos[0], bad_pos[1], bad_pos[2], bad_euler[0], bad_euler[1], bad_euler[2]])
+		badPose = np.array([bad_pos[0], bad_pos[1], bad_pos[2], bad_euler[0], bad_euler[1], bad_euler[2]])
 		return goodPose
 
 	def get_fk(self):
@@ -242,4 +263,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
 	main(sys.argv)
-

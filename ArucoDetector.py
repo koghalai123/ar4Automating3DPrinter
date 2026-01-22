@@ -1,9 +1,8 @@
-# Aruco marker can be spawned ingazebo with these commands: 
-# export GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models
-# ros2 run ros_gz_sim create -file /home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf -name aruco_marker -x -0.6 -y 0 -z 0.4 -R 0 -P 0 -Y 0
+# To create marker: ros2 run ros_gz_sim create -file /home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf -name aruco_marker -x -0.6 -y 0 -z 0.4 -R 0 -P 0 -Y 0
+# To delete the marker: gz service -s /world/default/remove --reqtype gz.msgs.Entity --reptype gz.msgs.Boolean --timeout 1000 --req 'name: "aruco_marker" type: MODEL'
 
 #To view frames: ros2 run tf2_tools view_frames
-
+# To view transformation: ros2 run tf2_ros tf2_echo world ee_link
 
 
 #!/usr/bin/env python3
@@ -24,16 +23,13 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
     Extends CameraViewer to detect and display ArUco markers.
     """
     def __init__(self):
-        # Cooperative multiple inheritance with explicit node name
         super().__init__('aruco_detection_viewer', enable_pose_print=False)
         
         # Declare ArUco-specific parameters
         self.declare_parameter('aruco_dict', 'DICT_4X4_50')
-        self.declare_parameter('marker_size', 0.05)  # Size in meters (matching your model.sdf)
+        self.declare_parameter('marker_size', 0.05)  # Size in meters 
         self.declare_parameter('show_rejected', False)
-        
-        # Declare calibration mode parameter
-        self.declare_parameter('calibration_mode', True)
+        self.declare_parameter('calibration_mode', False)
         
         aruco_dict_name = self.get_parameter('aruco_dict').get_parameter_value().string_value
         self.marker_size = self.get_parameter('marker_size').get_parameter_value().double_value
@@ -48,17 +44,11 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         self.dist_coeffs = None
         self.camera_frame = None
 
-
-        # Subscribe to camera info for calibration parameters
         self.camera_info_sub = self.create_subscription(
             CameraInfo, '/rgbd_camera/camera_info', self.camera_info_callback, 10
         )
         
-        # Track the number of detected markers to log only on changes
         self.last_marker_count = 0
-        # Avoid spamming TF warnings
-        self._warned_tf_failure = False
-        # Throttle per-frame console logging
         self._last_log_time = 0.0
         self.log_interval_s = 1.0
         # Display scaling for larger window
@@ -98,10 +88,6 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
             'DICT_ARUCO_ORIGINAL': cv2.aruco.DICT_ARUCO_ORIGINAL,
         }
         
-        if dict_name not in dict_map:
-            self.get_logger().warn(f'Unknown dictionary {dict_name}, defaulting to DICT_4X4_50')
-            dict_name = 'DICT_4X4_50'
-        
         return cv2.aruco.getPredefinedDictionary(dict_map[dict_name])
 
     def _lookup_base_camera_transform(self):
@@ -121,12 +107,12 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         Convert position and Euler angles to a 4x4 homogeneous transformation matrix.
         Args:
             position: [x, y, z] list or array
-            euler_angles: [roll, pitch, yaw] in radians, 'XYZ' order
+            euler_angles: [roll, pitch, yaw] in radians, "XYZ" order
         Returns:
             4x4 numpy array (homogeneous matrix)
         """
         # Create rotation matrix from Euler angles
-        rot = R.from_euler('XYZ', euler_angles, degrees=False)
+        rot = R.from_euler("XYZ", euler_angles, degrees=False)
         rotation_matrix = rot.as_matrix()
         
         # Create homogeneous matrix
@@ -149,11 +135,16 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         # Draw detected markers
         output_image = image.copy()
         marker_poses = []
-        
+        self.cameraPose = None
+        self.markerFromCamera = None
 
         if ids is not None and len(ids) > 0:
             # Draw all detected markers
             cv2.aruco.drawDetectedMarkers(output_image, corners, ids)
+            
+            if self.camera_matrix is None or self.dist_coeffs is None:
+                self.get_logger().warn("Camera intrinsics not yet received. Skipping pose estimation.", throttle_duration_sec=0.5)
+                return output_image, marker_poses
             
             # If we have camera calibration, estimate pose
             for i, corner in enumerate(corners):
@@ -171,20 +162,25 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                 # Convert rotation vector to euler angles (radians)
                 rotation_matrix, _ = cv2.Rodrigues(rvec[0])
                 rot = R.from_matrix(rotation_matrix)
-                roll, pitch, yaw = rot.as_euler('XYZ', degrees=False)
+                roll, pitch, yaw = rot.as_euler("XYZ", degrees=False)
                 euler_cam = np.array([roll, pitch, yaw])
                 
                 # Get camera pose in base frame using get_frame
                 camera_pos, camera_euler = self._lookup_base_camera_transform()
                 
+
+
                 # Check if calibration mode is enabled and not yet calibrated
                 calibration_mode = self.get_parameter('calibration_mode').get_parameter_value().bool_value
                 if calibration_mode:
                     HTM_camera = self.pose_to_homogeneous_matrix(camera_pos, camera_euler)
+
+                    # Define the "true" marker pose in the base frame (example values)
+                    true_position_base = np.array([0.6, -0.0, 0.4])  # Example: [x, y, z]
+                    true_rpy_base = np.array([0.0, 0.0, 0])  # Example: [roll, pitch, yaw] in degrees
                     HTM_marker_cam = self.pose_to_homogeneous_matrix(position_cam, euler_cam)
 
                     self.get_logger().info('Calibration mode: Logging marker poses for all offset combinations (pi/2 increments)')
-                    # Possible offsets: 0, 90°, 180°, 270° (in radians)
                     offsets = [0, np.pi/2, np.pi, 3*np.pi/2]
                     for roll_offset in offsets:
                         for pitch_offset in offsets:
@@ -196,16 +192,27 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                                 HTM_marker_base = HTM_camera @ HTM_marker_cam
                                 position_base = HTM_marker_base[:3, 3]
                                 rot_base = R.from_matrix(HTM_marker_base[:3, :3])
-                                rpy_base = rot_base.as_euler('XYZ', degrees=True)
+                                rpy_base = rot_base.as_euler("XYZ", degrees=False)
+
+                                # Calculate deviations from the "true" pose
+                                position_deviation = np.linalg.norm(position_base - true_position_base)
+                                rpy_deviation = rpy_base - true_rpy_base
+
                                 self.get_logger().info(
                                     f'Offset [{np.degrees(roll_offset):.0f}°, {np.degrees(pitch_offset):.0f}°, {np.degrees(yaw_offset):.0f}°]: '
                                     f'Pos [{position_base[0]:.3f}, {position_base[1]:.3f}, {position_base[2]:.3f}], '
-                                    f'RPY [{rpy_base[0]:.1f}°, {rpy_base[1]:.1f}°, {rpy_base[2]:.1f}°]'
+                                    f'RPY [{rpy_base[0]:.1f}, {rpy_base[1]:.1f}, {rpy_base[2]:.1f}] | '
+                                    f'Deviation: Pos [{position_deviation:.3f}m], '
+                                    f'RPY [{rpy_deviation[0]:.1f}, {rpy_deviation[1]:.1f}, {rpy_deviation[2]:.1f}]'
                                 )
+
+
+
                     self.get_logger().info('Calibration complete. Disable calibration_mode and set the chosen offset manually.')
-                
+                self.cameraPose = (camera_pos, camera_euler)
+                self.markerFromCamera = (position_cam, euler_cam)
                 # Use fixed offset (update this with the chosen calibration result)
-                camera_euler = camera_euler + np.array([np.pi, np.pi, np.pi])  # Replace with calibrated values, e.g., np.array([0, np.pi, 0])
+                camera_euler = camera_euler + np.array([1.4833,-0.7164,-2.5899])  # Replace with calibrated values, e.g., np.array([0, np.pi, 0])
                 
                 # Create HTMs
                 HTM_camera = self.pose_to_homogeneous_matrix(camera_pos, camera_euler)
@@ -215,7 +222,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                 HTM_marker_base = HTM_camera @ HTM_marker_cam
                 position_base = HTM_marker_base[:3, 3]
                 rot_base = R.from_matrix(HTM_marker_base[:3, :3])
-                rpy_base = rot_base.as_euler('XYZ', degrees=True)
+                rpy_base = rot_base.as_euler("XYZ", degrees=True)
 
 
                 orientation_base = {
@@ -263,6 +270,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
             # Only log when the number of markers changes
             current_marker_count = len(ids)
             if current_marker_count != self.last_marker_count:
+                self.last_marker_count = current_marker_count
                 marker_ids = ids.flatten().tolist()
                 self.get_logger().info(f'Detected {current_marker_count} ArUco marker(s): {marker_ids}')
                 # Log pose information using already computed marker_poses
@@ -292,11 +300,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
             if self.last_marker_count > 0:
                 self.get_logger().info('No ArUco markers detected')
                 self.last_marker_count = 0
-        
-        # Optionally draw rejected markers
-        if self.show_rejected and rejected is not None and len(rejected) > 0:
-            cv2.aruco.drawDetectedMarkers(output_image, rejected, borderColor=(100, 0, 255))
-        
+
         return output_image, marker_poses
 
     def render(self):
@@ -422,12 +426,28 @@ def main(args=None):
     rclpy.init(args=args)
     node = ArucoDetectionViewer()
     def spawn_aruco_marker(n: Node):
+        delete_cmd = [
+            'gz', 'service', '-s', '/world/default/remove',
+            '--reqtype', 'gz.msgs.Entity', '--reptype', 'gz.msgs.Boolean',
+            '--timeout', '1000', '--req', 'name: "aruco_marker" type: MODEL'
+        ]
+        try:
+            result = subprocess.run(delete_cmd, capture_output=True, text=True, check=True)
+            msg = result.stdout.strip() or 'Existing marker deleted successfully'
+            n.get_logger().info(f'Aruco delete: {msg}')
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or e.stdout or str(e)).strip()
+            n.get_logger().warn(f'Aruco delete failed (possibly no existing marker): {err}')
+        except Exception as e:
+            n.get_logger().warn(f'Aruco delete exception: {e}')
+
+
         cmd = [
             'ros2', 'run', 'ros_gz_sim', 'create',
             '-file', '/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf',
             '-name', 'aruco_marker',
-            '-x', '-0.6', '-y', '0', '-z', '0.4',
-            '-R', '0', '-P', '0', '-Y', '0'
+            '-x', '0', '-y', '-0.6', '-z', '0.4',
+            '-R', '0', '-P', '0', '-Y', '1.57'
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
