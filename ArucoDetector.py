@@ -10,30 +10,67 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
-from cv_bridge import CvBridge
 import cv2
 from showVideoFeed import CameraViewer
 from poseReader import PoseReader
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import subprocess
-from tf2_geometry_msgs import do_transform_pose
-from geometry_msgs.msg import Pose, TransformStamped
+from geometry_msgs.msg import Pose, TransformStamped, PoseStamped
 import tf2_ros
 from rclpy.time import Time
 from tf2_geometry_msgs import do_transform_pose
-from geometry_msgs.msg import PoseStamped
 
-class ArucoDetectionViewer(PoseReader, CameraViewer):
-    def cameraToBase(self, pose: Pose, source_frame: str = "base_link", target_frame: str = "ee_camera_link"):
-        """
-        Perform frame lookup and transformation using tf2_ros, similar to follow_aruco_marker.py.
-        Returns the transformed pose (geometry_msgs/Pose) in the target frame.
-        """
-                    
+class ArucoDetectionViewer(PoseReader, CameraViewer): 
+    """
+    Extends CameraViewer to detect and display ArUco markers.
+    """
+    def __init__(self):
+        super().__init__('aruco_detection_viewer', enable_pose_print=False)
+        
+        # Declare ArUco-spe cific parameters
+        self.aruco_dict = self._get_aruco_dict('DICT_4X4_50')
+        self.marker_size =  0.05  # Size in meters 
+        self.calibration_mode = False
+        
+        # Initialize ArUco detector
+        self.aruco_params = cv2.aruco.DetectorParameters_create()
+        
+        # Camera intrinsics - will be populated from camera_info topic
+        self.camera_matrix = None
+        self.dist_coeffs = None
+        self.camera_frame = None
+
+        self.camera_info_sub = self.create_subscription(
+            CameraInfo, '/rgbd_camera/camera_info', self.camera_info_callback, 10
+        )
+
+        self.last_marker_count = 0
+        self._last_log_time = 0.0
+        self.log_interval_s = 1.0
+        # Display scaling for larger window
+        self.display_scale = 2.0
+        
+        self.get_logger().info(f'ArUco detector initialized with dictionary: {self.aruco_dict}')
+        self.get_logger().info(f'Marker size: {self.marker_size}m')
+        self.tf2_buffer = tf2_ros.Buffer()
+        self.tf2_listener = tf2_ros.TransformListener(self.tf2_buffer, self)
+
+        self.markerNamePrefix = "aruco_marker_"
+
+    def applyFrameChange(self, posInFrame, eulerInFrame, source_frame = "base_link", target_frame = "ee_camera_link"):
+        pose = Pose()
+        pose.position.x = float(posInFrame[0])
+        pose.position.y = float(posInFrame[1])
+        pose.position.z = float(posInFrame[2])
+        q_cam = R.from_euler("XYZ", eulerInFrame, degrees=False).as_quat()
+        pose.orientation.x = float(q_cam[0])
+        pose.orientation.y = float(q_cam[1])
+        pose.orientation.z = float(q_cam[2])
+        pose.orientation.w = float(q_cam[3])
         # Get the transform from source_frame to target_frame
         try:
-            transform = self.tf2_buffer.lookup_transform(target_frame, source_frame, Time())
+            transform = self.tf2_buffer.lookup_transform(source_frame, target_frame, Time())
         except:
             print("Transform lookup failed")
             return None, None
@@ -47,54 +84,54 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
             transformed_pose.orientation.z,
             transformed_pose.orientation.w
         ]
-        euler = R.from_quat(tf2_quat).as_euler("XYZ", degrees=False)
-        
-        pos = [transformed_pose.position.x, transformed_pose.position.y, transformed_pose.position.z]
-        #self.get_logger().info(
+        badEuler = R.from_quat(tf2_quat).as_euler("XYZ", degrees=False)
+        badPos = np.array([transformed_pose.position.x, transformed_pose.position.y, transformed_pose.position.z])
+
+        return badPos, badEuler
+    
+    def cameraToBase(self, posInFrame, eulerInFrame, source_frame: str = "base_link", target_frame: str = "ee_camera_link", markerID: int = 0):
+        """
+        Perform frame lookup and transformation using tf2_ros, similar to follow_aruco_marker.py.
+        Returns the transformed pose (geometry_msgs/Pose) in the target frame.
+        """
+        badPos, badEuler = self.applyFrameChange(posInFrame, eulerInFrame, source_frame="base_link", target_frame="ee_camera_link")
+                #self.get_logger().info(
         #    f"{source_frame} -> {target_frame}: position = {pos}, euler(rad)=[R={euler[0]:.3f}, P={euler[1]:.3f}, Y={euler[2]:.3f}]"
         #)
-        goodPos, goodEuler = self.to_good_frame(pos,euler)
+        if badPos is None:
+            return None, None
+        goodPos, goodEuler = self.to_good_frame(badPos,badEuler)
+
+    
+        # Broadcast marker transform (pose in world)
+        self.broadcast_marker_transform(badPos, badEuler, parent_frame="base_link", child_frame=f"{self.markerNamePrefix}{markerID}")
+
         return goodPos, goodEuler
-    """
-    Extends CameraViewer to detect and display ArUco markers.
-    """
-    def __init__(self):
-        super().__init__('aruco_detection_viewer', enable_pose_print=False)
-        
-        # Declare ArUco-specific parameters
-        self.declare_parameter('aruco_dict', 'DICT_4X4_50')
-        self.declare_parameter('marker_size', 0.05)  # Size in meters 
-        self.declare_parameter('show_rejected', False)
-        self.declare_parameter('calibration_mode', False)
-        
-        aruco_dict_name = self.get_parameter('aruco_dict').get_parameter_value().string_value
-        self.marker_size = self.get_parameter('marker_size').get_parameter_value().double_value
-        self.show_rejected = self.get_parameter('show_rejected').get_parameter_value().bool_value
-        
-        # Initialize ArUco detector
-        self.aruco_dict = self._get_aruco_dict(aruco_dict_name)
-        self.aruco_params = cv2.aruco.DetectorParameters_create()
-        
-        # Camera intrinsics - will be populated from camera_info topic
-        self.camera_matrix = None
-        self.dist_coeffs = None
-        self.camera_frame = None
-
-        self.camera_info_sub = self.create_subscription(
-            CameraInfo, '/rgbd_camera/camera_info', self.camera_info_callback, 10
-        )
-        
-        self.last_marker_count = 0
-        self._last_log_time = 0.0
-        self.log_interval_s = 1.0
-        # Display scaling for larger window
-        self.display_scale = 2.0
-        
-        self.get_logger().info(f'ArUco detector initialized with dictionary: {aruco_dict_name}')
-        self.get_logger().info(f'Marker size: {self.marker_size}m')
-        self.tf2_buffer = tf2_ros.Buffer()
-        self.tf2_listener = tf2_ros.TransformListener(self.tf2_buffer, self)
-
+    
+    def broadcast_marker_transform(self, marker_pos, marker_orient, parent_frame="base_link", child_frame="aruco_marker"):
+            """
+            Broadcasts the marker pose as a transform in the tf2 tree.
+            marker_pos: [x, y, z] position in parent_frame
+            marker_orient: [roll, pitch, yaw] in radians in parent_frame
+            parent_frame: world/base frame
+            child_frame: marker frame name
+            """
+            if not hasattr(self, 'tf2_broadcaster'):
+                self.tf2_broadcaster = tf2_ros.TransformBroadcaster(self)
+            t = TransformStamped()
+            t.header.stamp = self.get_clock().now().to_msg()
+            t.header.frame_id = parent_frame
+            t.child_frame_id = child_frame
+            t.transform.translation.x = float(marker_pos[0])
+            t.transform.translation.y = float(marker_pos[1])
+            t.transform.translation.z = float(marker_pos[2])
+            quat = R.from_euler("XYZ", marker_orient, degrees=False).as_quat()
+            t.transform.rotation.x = float(quat[0])
+            t.transform.rotation.y = float(quat[1])
+            t.transform.rotation.z = float(quat[2])
+            t.transform.rotation.w = float(quat[3])
+            self.tf2_broadcaster.sendTransform(t)
+    
 
     def camera_info_callback(self, msg: CameraInfo):
         """Extract camera calibration parameters from CameraInfo message."""
@@ -128,38 +165,6 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         }
         
         return cv2.aruco.getPredefinedDictionary(dict_map[dict_name])
-
-    def _lookup_base_camera_transform(self):
-        """
-        Get the camera pose in the world frame using PoseReader's get_frame method.
-        Returns a tuple: (position, euler_angles)
-        """
-        # Use the camera frame if available, otherwise default to 'ee_camera_link'
-        frame = self.camera_frame if self.camera_frame else "ee_camera_link"
-        pose = self.get_frame(frame)
-        position = pose[:3]
-        euler_angles = pose[3:]
-        return position, euler_angles
-
-    def pose_to_homogeneous_matrix(self, position, euler_angles):
-        """
-        Convert position and Euler angles to a 4x4 homogeneous transformation matrix.
-        Args:
-            position: [x, y, z] list or array
-            euler_angles: [roll, pitch, yaw] in radians, "XYZ" order
-        Returns:
-            4x4 numpy array (homogeneous matrix)
-        """
-        # Create rotation matrix from Euler angles
-        rot = R.from_euler("XYZ", euler_angles, degrees=False)
-        rotation_matrix = rot.as_matrix()
-        
-        # Create homogeneous matrix
-        homogeneous_matrix = np.eye(4)
-        homogeneous_matrix[:3, :3] = rotation_matrix
-        homogeneous_matrix[:3, 3] = position
-        
-        return homogeneous_matrix
 
     def _detect_aruco_markers(self, image: np.ndarray) -> tuple:
         """
@@ -206,17 +211,9 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
 
                 # --- Comparison using do_transform_pose ---
                 # 1. Create Pose for marker in camera frame
-                pose_in_cam = Pose()
-                pose_in_cam.position.x = float(position_cam[0])
-                pose_in_cam.position.y = float(position_cam[1])
-                pose_in_cam.position.z = float(position_cam[2])
-                q_cam = R.from_euler("XYZ", euler_cam, degrees=False).as_quat()
-                pose_in_cam.orientation.x = float(q_cam[0])
-                pose_in_cam.orientation.y = float(q_cam[1])
-                pose_in_cam.orientation.z = float(q_cam[2])
-                pose_in_cam.orientation.w = float(q_cam[3])
+                
 
-                markerPos, markerOrient = self.cameraToBase(pose_in_cam, source_frame="ee_camera_link", target_frame="base_link")
+                markerPos, markerOrient = self.cameraToBase(position_cam, euler_cam, source_frame="ee_camera_link", target_frame="base_link", markerID=marker_id)
 
                 # Store pose data for overlay
                 if markerPos is None:
@@ -224,6 +221,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
 
                 entry = {
                     'id': marker_id,
+                    'tf2Name': f"{self.markerNamePrefix}{marker_id}",
                     'positionFromCamera': position_cam,
                     'orientFromCamera': {
                         'roll': (roll),
@@ -238,7 +236,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                         'yaw': (markerOrient[2])
                     }   
                 }
-                
+
                 marker_poses.append(entry)
                 
                 # Draw axis for each marker
@@ -261,24 +259,6 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                 )
             
             
-                """
-                entry = {
-                    'id': marker_id,
-                    'positionFromCamera': position_cam,
-                    'orientFromCamera': {
-                        'roll': np.degrees(roll),
-                        'pitch': np.degrees(pitch),
-                        'yaw': np.degrees(yaw)
-                    },
-                    'distanceFromCamera': distance,
-                    'positionInWorld': markerPos,
-                    'orientInWorld': {
-                        'roll': np.degrees(markerOrient[3]),
-                        'pitch': np.degrees(markerOrient[4]),
-                        'yaw': np.degrees(markerOrient[5])
-                    }   
-                }"""
-
             # Only log when the number of markers changes
             current_marker_count = len(ids)
             if current_marker_count != self.last_marker_count:
@@ -304,7 +284,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
             if self.last_marker_count > 0:
                 self.get_logger().info('No ArUco markers detected')
                 self.last_marker_count = 0
-
+        self.marker_poses = marker_poses
         return output_image, marker_poses
 
     def render(self):
