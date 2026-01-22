@@ -17,8 +17,44 @@ from poseReader import PoseReader
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import subprocess
+from tf2_geometry_msgs import do_transform_pose
+from geometry_msgs.msg import Pose, TransformStamped
+import tf2_ros
+from rclpy.time import Time
+from tf2_geometry_msgs import do_transform_pose
+from geometry_msgs.msg import PoseStamped
 
 class ArucoDetectionViewer(PoseReader, CameraViewer):
+    def cameraToBase(self, pose: Pose, source_frame: str = "base_link", target_frame: str = "ee_camera_link"):
+        """
+        Perform frame lookup and transformation using tf2_ros, similar to follow_aruco_marker.py.
+        Returns the transformed pose (geometry_msgs/Pose) in the target frame.
+        """
+                    
+        # Get the transform from source_frame to target_frame
+        try:
+            transform = self.tf2_buffer.lookup_transform(target_frame, source_frame, Time())
+        except:
+            print("Transform lookup failed")
+            return None, None
+
+        # Transform the pose
+        transformed_pose = do_transform_pose(pose, transform)
+        # Convert quaternion to Euler angles for logging
+        tf2_quat = [
+            transformed_pose.orientation.x,
+            transformed_pose.orientation.y,
+            transformed_pose.orientation.z,
+            transformed_pose.orientation.w
+        ]
+        euler = R.from_quat(tf2_quat).as_euler("XYZ", degrees=False)
+        
+        pos = [transformed_pose.position.x, transformed_pose.position.y, transformed_pose.position.z]
+        #self.get_logger().info(
+        #    f"{source_frame} -> {target_frame}: position = {pos}, euler(rad)=[R={euler[0]:.3f}, P={euler[1]:.3f}, Y={euler[2]:.3f}]"
+        #)
+        goodPos, goodEuler = self.to_good_frame(pos,euler)
+        return goodPos, goodEuler
     """
     Extends CameraViewer to detect and display ArUco markers.
     """
@@ -29,7 +65,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         self.declare_parameter('aruco_dict', 'DICT_4X4_50')
         self.declare_parameter('marker_size', 0.05)  # Size in meters 
         self.declare_parameter('show_rejected', False)
-        self.declare_parameter('calibration_mode', True)
+        self.declare_parameter('calibration_mode', False)
         
         aruco_dict_name = self.get_parameter('aruco_dict').get_parameter_value().string_value
         self.marker_size = self.get_parameter('marker_size').get_parameter_value().double_value
@@ -56,6 +92,9 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         
         self.get_logger().info(f'ArUco detector initialized with dictionary: {aruco_dict_name}')
         self.get_logger().info(f'Marker size: {self.marker_size}m')
+        self.tf2_buffer = tf2_ros.Buffer()
+        self.tf2_listener = tf2_ros.TransformListener(self.tf2_buffer, self)
+
 
     def camera_info_callback(self, msg: CameraInfo):
         """Extract camera calibration parameters from CameraInfo message."""
@@ -164,85 +203,40 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                 rot = R.from_matrix(rotation_matrix)
                 roll, pitch, yaw = rot.as_euler("XYZ", degrees=False)
                 euler_cam = np.array([roll, pitch, yaw])
-                
-                # Get camera pose in base frame using get_frame
-                camera_pos, camera_euler = self._lookup_base_camera_transform()
-                
 
+                # --- Comparison using do_transform_pose ---
+                # 1. Create Pose for marker in camera frame
+                pose_in_cam = Pose()
+                pose_in_cam.position.x = float(position_cam[0])
+                pose_in_cam.position.y = float(position_cam[1])
+                pose_in_cam.position.z = float(position_cam[2])
+                q_cam = R.from_euler("XYZ", euler_cam, degrees=False).as_quat()
+                pose_in_cam.orientation.x = float(q_cam[0])
+                pose_in_cam.orientation.y = float(q_cam[1])
+                pose_in_cam.orientation.z = float(q_cam[2])
+                pose_in_cam.orientation.w = float(q_cam[3])
 
-                # Check if calibration mode is enabled and not yet calibrated
-                calibration_mode = self.get_parameter('calibration_mode').get_parameter_value().bool_value
-                if calibration_mode:
-                    HTM_camera = self.pose_to_homogeneous_matrix(camera_pos, camera_euler)
+                markerPos, markerOrient = self.cameraToBase(pose_in_cam, source_frame="ee_camera_link", target_frame="base_link")
 
-                    # Define the "true" marker pose in the base frame (example values)
-                    true_position_base = np.array([0.6, -0.0, 0.4])  # Example: [x, y, z]
-                    true_rpy_base = np.array([0.0, 0.0, 0])  # Example: [roll, pitch, yaw] in degrees
-                    HTM_marker_cam = self.pose_to_homogeneous_matrix(position_cam, euler_cam)
-
-                    self.get_logger().info('Calibration mode: Logging marker poses for all offset combinations (pi/2 increments)')
-                    offsets = [0, np.pi/2, np.pi, 3*np.pi/2]
-                    for roll_offset in offsets:
-                        for pitch_offset in offsets:
-                            for yaw_offset in offsets:
-                                offset = np.array([roll_offset, pitch_offset, yaw_offset])
-                                camera_euler_offset = camera_euler + offset
-                                # Create HTMs
-                                HTM_camera = self.pose_to_homogeneous_matrix(camera_pos, camera_euler_offset)
-                                HTM_marker_base = HTM_camera @ HTM_marker_cam
-                                position_base = HTM_marker_base[:3, 3]
-                                rot_base = R.from_matrix(HTM_marker_base[:3, :3])
-                                rpy_base = rot_base.as_euler("XYZ", degrees=False)
-
-                                # Calculate deviations from the "true" pose
-                                position_deviation = np.linalg.norm(position_base - true_position_base)
-                                rpy_deviation = rpy_base - true_rpy_base
-
-                                self.get_logger().info(
-                                    f'Offset [{np.degrees(roll_offset):.0f}°, {np.degrees(pitch_offset):.0f}°, {np.degrees(yaw_offset):.0f}°]: '
-                                    f'Pos [{position_base[0]:.3f}, {position_base[1]:.3f}, {position_base[2]:.3f}], '
-                                    f'RPY [{rpy_base[0]:.1f}, {rpy_base[1]:.1f}, {rpy_base[2]:.1f}] | '
-                                    f'Deviation: Pos [{position_deviation:.3f}m], '
-                                    f'RPY [{rpy_deviation[0]:.1f}, {rpy_deviation[1]:.1f}, {rpy_deviation[2]:.1f}]'
-                                )
-
-
-
-                    self.get_logger().info('Calibration complete. Disable calibration_mode and set the chosen offset manually.')
-                self.cameraPose = (camera_pos, camera_euler)
-                self.markerFromCamera = (position_cam, euler_cam)
-                # Use fixed offset (update this with the chosen calibration result)
-                camera_euler = camera_euler + np.array([ 3/2* np.pi, 3/2* np.pi, 3/2* np.pi])  # Replace with calibrated values, e.g., np.array([0, np.pi, 0])
-                
-                # Create HTMs
-                HTM_camera = self.pose_to_homogeneous_matrix(camera_pos, camera_euler)
-                HTM_marker_cam = self.pose_to_homogeneous_matrix(position_cam, euler_cam)
-
-                # Transform marker to base frame
-                HTM_marker_base = HTM_camera @ HTM_marker_cam
-                position_base = HTM_marker_base[:3, 3]
-                rot_base = R.from_matrix(HTM_marker_base[:3, :3])
-                rpy_base = rot_base.as_euler("XYZ", degrees=True)
-
-
-                orientation_base = {
-                    'roll': float(rpy_base[0]),
-                    'pitch': float(rpy_base[1]),
-                    'yaw': float(rpy_base[2]),
-                }
-                
                 # Store pose data for overlay
+                if markerPos is None:
+                    continue
+
                 entry = {
                     'id': marker_id,
-                    'position': position_cam,
-                    'orientation': {
-                        'roll': np.degrees(roll),
-                        'pitch': np.degrees(pitch),
-                        'yaw': np.degrees(yaw)
+                    'positionFromCamera': position_cam,
+                    'orientFromCamera': {
+                        'roll': (roll),
+                        'pitch': (pitch),
+                        'yaw': (yaw)
                     },
-                    'distance': distance,
-                    'position_base': position_base,
-                    'orientation_base': orientation_base
+                    'distanceFromCamera': distance,
+                    'positionInWorld': markerPos,
+                    'orientInWorld': {
+                        'roll': (markerOrient[0]),
+                        'pitch': (markerOrient[1]),
+                        'yaw': (markerOrient[2])
+                    }   
                 }
                 
                 marker_poses.append(entry)
@@ -267,6 +261,24 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                 )
             
             
+                """
+                entry = {
+                    'id': marker_id,
+                    'positionFromCamera': position_cam,
+                    'orientFromCamera': {
+                        'roll': np.degrees(roll),
+                        'pitch': np.degrees(pitch),
+                        'yaw': np.degrees(yaw)
+                    },
+                    'distanceFromCamera': distance,
+                    'positionInWorld': markerPos,
+                    'orientInWorld': {
+                        'roll': np.degrees(markerOrient[3]),
+                        'pitch': np.degrees(markerOrient[4]),
+                        'yaw': np.degrees(markerOrient[5])
+                    }   
+                }"""
+
             # Only log when the number of markers changes
             current_marker_count = len(ids)
             if current_marker_count != self.last_marker_count:
@@ -276,24 +288,16 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                 # Log pose information using already computed marker_poses
                 for entry in marker_poses:
                     marker_id = entry['id']
-                    position_cam = entry['position']
-                    orientation = entry['orientation']
-                    distance = entry['distance']
-                    if 'position_base' in entry and 'orientation_base' in entry:
-                        pb = entry['position_base']
-                        ob = entry['orientation_base']
-                        self.get_logger().info(
-                            f'  Marker {marker_id}: Camera [x={position_cam[0]:.3f}m, y={position_cam[1]:.3f}m, z={position_cam[2]:.3f}m, dist={distance:.3f}m] '
-                            f'R/P/Y [{orientation['roll']:.1f}°, {orientation['pitch']:.1f}°, {orientation['yaw']:.1f}°] | '
-                            f'Base [x={pb[0]:.3f}m, y={pb[1]:.3f}m, z={pb[2]:.3f}m] '
-                            f'R/P/Y [{ob['roll']:.1f}°, {ob['pitch']:.1f}°, {ob['yaw']:.1f}°]'
-                        )
-                    else:
-                        self.get_logger().info(
-                            f'  Marker {marker_id}: '
-                            f'Camera [x={position_cam[0]:.3f}m, y={position_cam[1]:.3f}m, z={position_cam[2]:.3f}m, dist={distance:.3f}m] '
-                            f'R/P/Y [{orientation['roll']:.1f}°, {orientation['pitch']:.1f}°, {orientation['yaw']:.1f}°]'
-                        )
+                    position_cam = entry['positionFromCamera']
+                    orient_cam = entry['orientFromCamera']
+                    distance_cam = entry['distanceFromCamera']
+                    position_base = entry['positionInWorld']
+                    orient_base = entry['orientInWorld']
+                    self.get_logger().info(
+                        f'  Marker {marker_id}: '
+                        f'Camera [{position_cam[0]:.3f}m, {position_cam[1]:.3f}m, {position_cam[2]:.3f}m, {orient_cam['roll']:.1f}°, {orient_cam['pitch']:.1f}°, {orient_cam['yaw']:.1f}] '
+                        f'World [{position_base[0]:.3f}m, {position_base[1]:.3f}m, {position_base[2]:.3f}m, {orient_base['roll']:.1f}°, {orient_base['pitch']:.1f}°, {orient_base['yaw']:.1f}] '
+                    )
                
         else:
             # Log when markers disappear
@@ -370,9 +374,9 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
 
         for pose_data in marker_poses:
             marker_id = pose_data['id']
-            position = pose_data['position']
-            orientation = pose_data['orientation']
-            distance = pose_data['distance']
+            position = pose_data['positionFromCamera']
+            orientation = pose_data['orientFromCamera']
+            distance = pose_data['distanceFromCamera']
 
             # Camera→marker
             cv2.putText(image, f"Marker {marker_id} (Camera→Marker):", (10, y_offset),
@@ -386,9 +390,9 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
             y_offset += line_height
 
             # Base→marker
-            if 'position_base' in pose_data and 'orientation_base' in pose_data:
-                pb = pose_data['position_base']
-                ob = pose_data['orientation_base']
+            if 'positionInWorld' in pose_data:
+                pb = pose_data['positionInWorld']
+                ob = pose_data['orientInWorld']
                 cv2.putText(image, f"  (Base→Marker):", (10, y_offset),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 2)
                 y_offset += line_height
@@ -401,25 +405,6 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
 
             y_offset += 2  # Small gap between markers
 
-        # Show last known end effector pose from PoseReader
-        y_offset += 10
-        cv2.putText(image, "End Effector Pose (from FK):", (10, y_offset),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
-        y_offset += line_height
-        try:
-            p = self.pose  # [x, y, z, roll, pitch, yaw]
-            q = self.quat  # [qx, qy, qz, qw]
-            cv2.putText(image, f"  Pos: X={p[0]:+.3f} Y={p[1]:+.3f} Z={p[2]:+.3f}", (10, y_offset),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            y_offset += line_height
-            cv2.putText(image, f"  RPY: R={p[3]:+.1f}° P={p[4]:+.1f}° Y={p[5]:+.1f}°", (10, y_offset),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            y_offset += line_height
-            cv2.putText(image, f"  Quat: x={q[0]:+.3f} y={q[1]:+.3f} z={q[2]:+.3f} w={q[3]:+.3f}", (10, y_offset),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        except Exception:
-            cv2.putText(image, "  (No pose available)", (10, y_offset),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
 
 def main(args=None):
