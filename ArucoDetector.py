@@ -29,7 +29,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         self.declare_parameter('aruco_dict', 'DICT_4X4_50')
         self.declare_parameter('marker_size', 0.05)  # Size in meters 
         self.declare_parameter('show_rejected', False)
-        self.declare_parameter('calibration_mode', False)
+        self.declare_parameter('calibration_mode', True)
         
         aruco_dict_name = self.get_parameter('aruco_dict').get_parameter_value().string_value
         self.marker_size = self.get_parameter('marker_size').get_parameter_value().double_value
@@ -212,7 +212,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                 self.cameraPose = (camera_pos, camera_euler)
                 self.markerFromCamera = (position_cam, euler_cam)
                 # Use fixed offset (update this with the chosen calibration result)
-                camera_euler = camera_euler + np.array([1.4833,-0.7164,-2.5899])  # Replace with calibrated values, e.g., np.array([0, np.pi, 0])
+                camera_euler = camera_euler + np.array([ 3/2* np.pi, 3/2* np.pi, 3/2* np.pi])  # Replace with calibrated values, e.g., np.array([0, np.pi, 0])
                 
                 # Create HTMs
                 HTM_camera = self.pose_to_homogeneous_matrix(camera_pos, camera_euler)
