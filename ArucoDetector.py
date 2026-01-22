@@ -57,6 +57,8 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         self.tf2_listener = tf2_ros.TransformListener(self.tf2_buffer, self)
 
         self.markerNamePrefix = "aruco_marker_"
+        self.filterStates = np.zeros((100,6))
+
 
     def applyFrameChange(self, posInFrame, eulerInFrame, source_frame = "base_link", target_frame = "ee_camera_link"):
         pose = Pose()
@@ -100,7 +102,17 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         #)
         if badPos is None:
             return None, None
-        goodPos, goodEuler = self.to_good_frame(badPos,badEuler)
+        
+        fCutoff = 1.0
+        RC = 1/(2*np.pi*fCutoff)
+        alpha = self.dt/(RC+self.dt)
+        prevState = self.filterStates[markerID, :]
+        badFilteredPos = alpha * badPos + (1 - alpha) * prevState[0:3]
+        badFilteredEuler = alpha * badEuler + (1 - alpha) * prevState[3:6]
+
+
+        self.filterStates[markerID, :] = np.hstack((badFilteredPos, badFilteredEuler))
+        goodPos, goodEuler = self.to_good_frame(badFilteredPos,badFilteredEuler)
 
     
         # Broadcast marker transform (pose in world)

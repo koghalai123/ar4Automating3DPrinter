@@ -27,7 +27,8 @@ class CameraViewer(Node):
         self.color_sub = self.create_subscription(Image, color_topic, self.color_callback, 10)
         self.depth_sub = self.create_subscription(Image, depth_topic, self.depth_callback, 10)
 
-        self.timer = self.create_timer(1.0 / 30.0, self.render)
+        self.dt = 1.0 / 30.0
+        self.timer = self.create_timer(self.dt, self.render)
 
         self.get_logger().info(f'Camera viewer subscribed to color: {color_topic}, depth: {depth_topic}')
         self.get_logger().info('Press "q" in the window to quit')

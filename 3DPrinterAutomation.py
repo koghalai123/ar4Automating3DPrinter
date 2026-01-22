@@ -30,7 +30,7 @@ class printerAutomation(ArucoDetectionViewer):
         self.timer = self.create_timer(5.0, self.moveToMarker)
 
     def moveToMarker(self, markerID=0):
-        offsetPos = np.array([0.0, 0.0, 0.15])  # 10 cm above the marker
+        offsetPos = np.array([0.0, 0.0, 0.15])  #position offset from marker
         offsetOri = np.array([0.0, 0.0, 0.0])  # No rotation offset
         if hasattr(self, 'marker_poses') and self.marker_poses is not None:
             for entry in self.marker_poses:
