@@ -54,7 +54,7 @@ class PoseReader(Node):
 			base_link_name=base_link_name,
 			end_effector_name=end_effector_name,
 			group_name=group_name,
-			use_move_group_action=False,
+			use_move_group_action=True,  # Use action instead of service
 			callback_group=self._cb_group,
 		)
 
