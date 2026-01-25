@@ -16,6 +16,7 @@ import sys
 import time
 from geometry_msgs.msg import Point, Quaternion, Pose
 from tf_transformations import quaternion_from_euler, euler_from_quaternion
+from moveit_msgs.msg import PositionConstraint, BoundingVolume, SolidPrimitive
 
 
 class constrainedMover(Node):
@@ -25,7 +26,9 @@ class constrainedMover(Node):
 		self.pose1 = np.array([0.35, 0.05, 0.45, 0, 0, 0])
 		self.pose2 = np.array([0.35, -0.05, 0.45, 0, 0, 0])
 
-		self.poseReader.moveit2.allowed_planning_time = 10.0
+		self.poseReader.moveit2.allowed_planning_time = 30.0
+		#self.poseReader.moveit2.pipeline_id = "ompl"
+		#self.poseReader.moveit2.planner_id = "RRTConnectkConfigDefault"
 		time.sleep(4.0)  # Wait for MoveIt2 to be ready
 		self.moveBetweenPoses()
 
@@ -51,7 +54,7 @@ class constrainedMover(Node):
 			quat_xyzw=q,
 			frame_id="base_link",  # or the appropriate frame
 			target_link=self.poseReader.end_effector_name,
-			tolerance=0.1  # Increase tolerance for path constraints
+			tolerance=0.15  # Increase tolerance for path constraints
 		)
 
 		# Move to pose with constraint
@@ -61,24 +64,54 @@ class constrainedMover(Node):
 		# Clear path constraints after movement
 		self.poseReader.moveit2.clear_path_constraints()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def main(argv=None):
+	def add_movement_constraint(self, constraint_type, value):
+		"""
+		Add a path constraint without moving.
+		constraint_type: 'orientation' or 'x', 'y', 'z'
+		value: for 'orientation', tuple (x,y,z,w) quaternion
+			   for 'x','y','z', float value to constrain to
+		"""
+		if constraint_type == 'orientation':
+			# Assume value is (x,y,z,w) quaternion tuple
+			self.poseReader.moveit2.set_path_orientation_constraint(
+				quat_xyzw=value,
+				frame_id="base_link",
+				target_link=self.poseReader.end_effector_name,
+				tolerance=0.15
+			)
+		elif constraint_type in ['x', 'y', 'z']:
+			# Get current position
+			self.poseReader.get_fk()
+			current_pos = self.poseReader.pose[:3]  # [x, y, z]
+			axis_index = {'x': 0, 'y': 1, 'z': 2}[constraint_type]
+			
+			# Set constrained position
+			constrained_pos = current_pos.copy()
+			constrained_pos[axis_index] = value
+			
+			# Create position constraint with box for anisotropic tolerance
+			constraint = PositionConstraint()
+			constraint.header.frame_id = "base_link"
+			constraint.link_name = self.poseReader.end_effector_name
+			constraint.constraint_region = BoundingVolume()
+			constraint.constraint_region.primitives.append(SolidPrimitive())
+			constraint.constraint_region.primitives[0].type = 1  # BOX
+			# Dimensions: half-sizes
+			tol_small = 0.001  # tight constraint on the axis
+			tol_large = 10.0   # loose on others
+			dimensions = [tol_large, tol_large, tol_large]
+			dimensions[axis_index] = tol_small
+			constraint.constraint_region.primitives[0].dimensions = dimensions
+			constraint.constraint_region.primitive_poses.append(Pose())
+			constraint.constraint_region.primitive_poses[0].position.x = constrained_pos[0]
+			constraint.constraint_region.primitive_poses[0].position.y = constrained_pos[1]
+			constraint.constraint_region.primitive_poses[0].position.z = constrained_pos[2]
+			constraint.weight = 1.0
+			
+			# Append to path constraints
+			self.poseReader.moveit2._MoveIt2__move_action_goal.request.path_constraints.position_constraints.append(constraint)
+		else:
+			self.get_logger().error(f"Unknown constraint type: {constraint_type}")
 	
 	rclpy.init(args=argv)
 	

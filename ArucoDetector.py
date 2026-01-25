@@ -29,8 +29,8 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         super().__init__('aruco_detection_viewer', enable_pose_print=False)
         
         # Declare ArUco-spe cific parameters
-        self.aruco_dict = self._get_aruco_dict('DICT_4X4_50')
-        self.marker_size =  0.05  # Size in meters 
+        self.aruco_dicts = [self._get_aruco_dict('DICT_4X4_50'), self._get_aruco_dict('DICT_6X6_50')]
+        self.marker_sizes = [0.03, 0.05]  # Sizes in meters, indexed by dictionary (4x4: 0.01m, 6x6: 0.05m) 
         self.calibration_mode = False
         
         # Initialize ArUco detector
@@ -51,8 +51,8 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         # Display scaling for larger window
         self.display_scale = 2.0
         
-        self.get_logger().info(f'ArUco detector initialized with dictionary: {self.aruco_dict}')
-        self.get_logger().info(f'Marker size: {self.marker_size}m')
+        self.get_logger().info(f'ArUco detector initialized with dictionaries: {[str(d) for d in self.aruco_dicts]}')
+        self.get_logger().info(f'Marker sizes: {self.marker_sizes}m')
         self.tf2_buffer = tf2_ros.Buffer()
         self.tf2_listener = tf2_ros.TransformListener(self.tf2_buffer, self)
 
@@ -185,8 +185,16 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         """
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # Detect markers (using older OpenCV API)
-        corners, ids, rejected = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
+        # Detect markers with all dictionaries
+        all_corners = []
+        all_ids = []
+        dict_indices = []  # to know which dict detected it
+        for idx, aruco_dict in enumerate(self.aruco_dicts):
+            corners, ids, rejected = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=self.aruco_params)
+            if ids is not None:
+                all_corners.extend(corners)
+                all_ids.extend(ids)
+                dict_indices.extend([idx] * len(ids))
         
         # Draw detected markers
         output_image = image.copy()
@@ -194,21 +202,30 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
         self.cameraPose = None
         self.markerFromCamera = None
 
-        if ids is not None and len(ids) > 0:
+        if all_ids:
+            # Convert to numpy arrays for OpenCV
+            all_corners_np = all_corners
+            all_ids_np = np.array(all_ids).reshape(-1, 1)
             # Draw all detected markers
-            cv2.aruco.drawDetectedMarkers(output_image, corners, ids)
+            cv2.aruco.drawDetectedMarkers(output_image, all_corners_np, all_ids_np)
             
             if self.camera_matrix is None or self.dist_coeffs is None:
                 self.get_logger().warn("Camera intrinsics not yet received. Skipping pose estimation.", throttle_duration_sec=0.5)
                 return output_image, marker_poses
             
             # If we have camera calibration, estimate pose
-            for i, corner in enumerate(corners):
-                marker_id = ids[i][0]
+            seen = set()
+            for i, corner in enumerate(all_corners):
+                marker_id = all_ids[i][0]
+                if marker_id in seen:
+                    continue
+                seen.add(marker_id)
+                dict_idx = dict_indices[i]
+                marker_size = self.marker_sizes[dict_idx]
                 
                 # Estimate pose of each marker (camera -> marker)
                 rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(
-                    corner, self.marker_size, self.camera_matrix, self.dist_coeffs
+                    corner, marker_size, self.camera_matrix, self.dist_coeffs
                 )
                 
                 # Extract position (translation vector)
@@ -236,9 +253,9 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                     'tf2Name': f"{self.markerNamePrefix}{marker_id}",
                     'positionFromCamera': position_cam,
                     'orientFromCamera': {
-                        'roll': (roll),
-                        'pitch': (pitch),
-                        'yaw': (yaw)
+                        'roll': np.degrees(roll),
+                        'pitch': np.degrees(pitch),
+                        'yaw': np.degrees(yaw)
                     },
                     'distanceFromCamera': distance,
                     'positionInWorld': markerPos,
@@ -254,7 +271,7 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
                 # Draw axis for each marker
                 cv2.drawFrameAxes(
                     output_image, self.camera_matrix, self.dist_coeffs,
-                    rvec[0], tvec[0], self.marker_size * 0.5
+                    rvec[0], tvec[0], marker_size * 0.5
                 )
                 
                 # Display ID and distance near marker
@@ -272,10 +289,10 @@ class ArucoDetectionViewer(PoseReader, CameraViewer):
             
             
             # Only log when the number of markers changes
-            current_marker_count = len(ids)
+            current_marker_count = len(all_ids)
             if current_marker_count != self.last_marker_count:
                 self.last_marker_count = current_marker_count
-                marker_ids = ids.flatten().tolist()
+                marker_ids = [id[0] for id in all_ids]
                 self.get_logger().info(f'Detected {current_marker_count} ArUco marker(s): {marker_ids}')
                 # Log pose information using already computed marker_poses
                 for entry in marker_poses:
