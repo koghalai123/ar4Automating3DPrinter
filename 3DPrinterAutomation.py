@@ -7,12 +7,9 @@ from showVideoFeed import CameraViewer
 from poseReader import PoseReader
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-import subprocess
 from geometry_msgs.msg import Pose, TransformStamped, PoseStamped
 import tf2_ros
 from rclpy.time import Time
-import tempfile
-import os
 
 
 
@@ -124,67 +121,6 @@ class printerAutomation(ArucoDetectionViewer):
             self.get_logger().error(f"Unknown constraint type: {constraint_type}")
 	
 
-
-def delete_aruco_marker(n: Node, name: str):
-    
-    delete_cmd = [
-        'gz', 'service', '-s', '/world/default/remove',
-        '--reqtype', 'gz.msgs.Entity', '--reptype', 'gz.msgs.Boolean',
-        '--timeout', '1000', '--req', f'name: "{name}" type: MODEL'
-    ]
-    try:
-        result = subprocess.run(delete_cmd, capture_output=True, text=True, check=True)
-        msg = result.stdout.strip() or 'Existing marker deleted successfully'
-        n.get_logger().info(f'Aruco delete: {msg}')
-    except subprocess.CalledProcessError as e:
-        err = (e.stderr or e.stdout or str(e)).strip()
-        n.get_logger().warn(f'Aruco delete failed (possibly no existing marker): {err}')
-    except Exception as e:
-        n.get_logger().warn(f'Aruco delete exception: {e}')
-
-def spawn_aruco_marker(n: Node, texture_path: str, marker_size: float, x: float, y: float, z: float, roll: float, pitch: float, yaw: float):
-    # Determine the name from the texture file
-    
-    name = os.path.basename(texture_path).split('.')[0]
-
-    delete_aruco_marker(n, name)
-    # Modify the SDF file with the new texture and size
-    sdf_path = '/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf'
-    with open(sdf_path, 'r') as f:
-        sdf_content = f.read()
-    # Replace the albedo_map line
-    old_texture_line = '              <albedo_map>materials/textures/marker.png</albedo_map>'
-    new_texture_line = f'              <albedo_map>{texture_path}</albedo_map>'
-    modified_sdf = sdf_content.replace(old_texture_line, new_texture_line)
-    # Replace the size line
-    old_size_line = f'            <size>0.0001 {0.05} {0.05}</size>'
-    new_size_line = f'            <size>0.0001 {marker_size} {marker_size}</size>'
-    modified_sdf = modified_sdf.replace(old_size_line, new_size_line)
-    # Write to a temporary file in the same directory as the model
-    model_dir = '/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/'
-    with tempfile.NamedTemporaryFile(dir=model_dir, mode='w', suffix='.sdf', delete=False) as temp_file:
-        temp_file.write(modified_sdf)
-        temp_sdf_path = temp_file.name
-
-    cmd = [
-        'ros2', 'run', 'ros_gz_sim', 'create',
-        '-file', temp_sdf_path,
-        '-name', name,
-        '-x', str(x), '-y', str(y), '-z', str(z),
-        '-R', str(roll), '-P', str(pitch), '-Y', str(yaw)
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        msg = result.stdout.strip() or 'Spawn command executed successfully'
-        n.get_logger().info(f'Aruco spawn: {msg}')
-    except subprocess.CalledProcessError as e:
-        err = (e.stderr or e.stdout or str(e)).strip()
-        n.get_logger().error(f'Aruco spawn failed: {err}')
-    except Exception as e:
-        n.get_logger().error(f'Aruco spawn exception: {e}')
-    finally:
-        # Clean up the temp file
-        os.unlink(temp_sdf_path)
 
 
 def main():
