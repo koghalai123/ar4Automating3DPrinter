@@ -4,6 +4,7 @@ import tempfile
 import time
 import math
 import threading
+import re
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -19,20 +20,124 @@ from ros_gz_interfaces.msg import Entity
 
 
 def rotate_vector_by_quaternion(v, q):
+    """Rotate a 3D vector by a quaternion."""
     rot_matrix = tf_transformations.quaternion_matrix(q)[:3, :3]
     return rot_matrix @ v
 
 
-class Simulated3DPrinter():
-    def __init__(self, pos, orient):
-        self.pos = pos
-        self.orient = orient
-        self.width = 0.2
-        self.height = 0.2
-        self.depth = 0.2
-
-    def delete_aruco_marker(self, name: str):
+class Simulated3DPrinter:
+    """
+    A simulated 3D printer with walls, a swinging door, and ArUco markers.
+    
+    Parameters:
+        node: ROS2 node for communication
+        pos: Position [x, y, z] in world frame
+        orient: Orientation [roll, pitch, yaw] in radians
+        width: Printer width (default 0.3)
+        depth: Printer depth (default 0.3)
+        height: Printer height (default 0.3)
+        wall_thickness: Wall thickness (default 0.01)
+        door_frequency: Door oscillation frequency in Hz (default 0.2)
+        door_amplitude: Door swing amplitude in radians (default pi/2)
+        model_dir: Directory for temporary SDF files
+    """
+    
+    def __init__(self, node, pos, orient, width=0.3, depth=0.3, height=0.3,
+                 wall_thickness=0.01, door_frequency=0.2, door_amplitude=math.pi/2,
+                 model_dir='/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/',
+                 aruco_sdf_path='/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf'):
         
+        self.node = node
+        self.pos = np.array(pos)
+        self.orient = np.array(orient)
+        self.width = width
+        self.depth = depth
+        self.height = height
+        self.wall_thickness = wall_thickness
+        self.door_frequency = door_frequency
+        self.door_amplitude = door_amplitude
+        self.model_dir = model_dir
+        self.aruco_sdf_path = aruco_sdf_path
+        
+        # TF components
+        self.tf_broadcaster = TransformBroadcaster(node)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, node)
+        
+        # Service client for setting poses (will be set up later)
+        self.set_pose_client = None
+        
+        # Compute quaternions
+        self.q = tf_transformations.quaternion_from_euler(
+            float(self.orient[0]), float(self.orient[1]), float(self.orient[2])
+        )
+        self.q = [float(x) for x in self.q]
+        self.q_marker = tf_transformations.quaternion_multiply(
+            self.q, tf_transformations.quaternion_from_euler(0, 0, math.pi/2)
+        )
+        self.q_marker = [float(x) for x in self.q_marker]
+        
+        # Store spawned entity names for cleanup
+        self.spawned_entities = []
+        self.markers = {}
+        self.walls = {}
+        
+        # Publishers for pose tracking
+        self.door_pose_pub = None
+        self.marker_pose_pub = None
+        
+        # Animation thread
+        self.animation_thread = None
+        self.running = False
+
+    def setup_pose_service(self, set_pose_client):
+        """Set the service client for pose updates."""
+        self.set_pose_client = set_pose_client
+
+    def _broadcast_printer_frame(self):
+        """Broadcast the printer's TF frame."""
+        transform = TransformStamped()
+        transform.header.stamp = self.node.get_clock().now().to_msg()
+        transform.header.frame_id = "world"
+        transform.child_frame_id = f"printer_frame"
+        transform.transform.translation.x = float(self.pos[0])
+        transform.transform.translation.y = float(self.pos[1])
+        transform.transform.translation.z = float(self.pos[2])
+        transform.transform.rotation.x = self.q[0]
+        transform.transform.rotation.y = self.q[1]
+        transform.transform.rotation.z = self.q[2]
+        transform.transform.rotation.w = self.q[3]
+        self.tf_broadcaster.sendTransform(transform)
+        return transform
+
+    def _get_transform_with_retry(self, target_frame, source_frame, timeout_sec=5.0):
+        """Get a TF transform with retry logic."""
+        start_time = time.time()
+        while time.time() - start_time < timeout_sec:
+            try:
+                return self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+                self._broadcast_printer_frame()
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+        raise tf2_ros.LookupException(
+            f"Could not get transform from {source_frame} to {target_frame} after {timeout_sec}s"
+        )
+
+    def _transform_point_to_world(self, local_x, local_y, local_z):
+        """Transform a point from printer frame to world frame."""
+        point_stamped = PointStamped()
+        point_stamped.header.frame_id = "printer_frame"
+        point_stamped.header.stamp = self.node.get_clock().now().to_msg()
+        point_stamped.point.x = float(local_x)
+        point_stamped.point.y = float(local_y)
+        point_stamped.point.z = float(local_z)
+        
+        transform = self._get_transform_with_retry("world", "printer_frame")
+        transformed = tf2_geometry_msgs.do_transform_point(point_stamped, transform)
+        return transformed.point.x, transformed.point.y, transformed.point.z
+
+    def _delete_entity(self, name):
+        """Delete an entity from Gazebo."""
         delete_cmd = [
             'gz', 'service', '-s', '/world/default/remove',
             '--reqtype', 'gz.msgs.Entity', '--reptype', 'gz.msgs.Boolean',
@@ -40,79 +145,92 @@ class Simulated3DPrinter():
         ]
         try:
             result = subprocess.run(delete_cmd, capture_output=True, text=True, check=True)
-            msg = result.stdout.strip() or 'Existing marker deleted successfully'
-            print(f'Aruco delete: {msg}')
+            msg = result.stdout.strip() or f'{name} deleted successfully'
+            self.node.get_logger().debug(f'Delete: {msg}')
         except subprocess.CalledProcessError as e:
-            err = (e.stderr or e.stdout or str(e)).strip()
-            print(f'Aruco delete failed (possibly no existing marker): {err}')
+            pass  # Entity might not exist
         except Exception as e:
-            print(f'Aruco delete exception: {e}')
+            self.node.get_logger().warn(f'Delete exception for {name}: {e}')
 
-    def spawn_aruco_marker(self, texture_path: str, marker_size: float, x: float, y: float, z: float, roll: float, pitch: float, yaw: float):
-        # Determine the name from the texture file
+    def spawn_aruco_marker(self, texture_path, marker_size, local_pos, name_prefix="marker"):
+        """
+        Spawn an ArUco marker relative to the printer.
         
+        Parameters:
+            texture_path: Path to the marker texture
+            marker_size: Size of the marker
+            local_pos: [x, y, z] position in printer frame
+            name_prefix: Prefix for the marker name
+        
+        Returns:
+            name: The spawned marker's name
+        """
         name = os.path.basename(texture_path).split('.')[0]
-
-        self.delete_aruco_marker(name)
-        # Modify the SDF file with the new texture and size
-        sdf_path = '/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf'
-        with open(sdf_path, 'r') as f:
+        self._delete_entity(name)
+        
+        # Read and modify SDF
+        with open(self.aruco_sdf_path, 'r') as f:
             sdf_content = f.read()
-        # Replace the albedo_map line
+        
+        # Replace texture
         old_texture_line = '              <albedo_map>materials/textures/marker.png</albedo_map>'
         new_texture_line = f'              <albedo_map>{texture_path}</albedo_map>'
         modified_sdf = sdf_content.replace(old_texture_line, new_texture_line)
-        # Replace the size line
+        
+        # Replace size
         old_size_line = f'            <size>0.0001 {0.05} {0.05}</size>'
         new_size_line = f'            <size>0.0001 {marker_size} {marker_size}</size>'
         modified_sdf = modified_sdf.replace(old_size_line, new_size_line)
-        # Make it non-static
+        
+        # Make non-static and remove collisions
         modified_sdf = modified_sdf.replace('<static>true</static>', '<static>false</static>')
-        # Write to a temporary file in the same directory as the model
-        model_dir = '/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/'
-        with tempfile.NamedTemporaryFile(dir=model_dir, mode='w', suffix='.sdf', delete=False) as temp_file:
+        modified_sdf = re.sub(r'<collision[^>]*>.*?</collision>', '', modified_sdf, flags=re.DOTALL)
+        
+        # Write temp file and spawn
+        with tempfile.NamedTemporaryFile(dir=self.model_dir, mode='w', suffix='.sdf', delete=False) as temp_file:
             temp_file.write(modified_sdf)
             temp_sdf_path = temp_file.name
-
+        
+        # Transform position to world
+        x, y, z = self._transform_point_to_world(*local_pos)
+        roll, pitch = float(self.orient[0]), float(self.orient[1])
+        yaw = float(self.orient[2]) + math.pi/2
+        
         cmd = [
             'ros2', 'run', 'ros_gz_sim', 'create',
-            '-file', temp_sdf_path,
-            '-name', name,
+            '-file', temp_sdf_path, '-name', name,
             '-x', str(x), '-y', str(y), '-z', str(z),
             '-R', str(roll), '-P', str(pitch), '-Y', str(yaw)
         ]
+        
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            msg = result.stdout.strip() or 'Spawn command executed successfully'
-            print(f'Aruco spawn: {msg}')
+            self.node.get_logger().info(f'Spawned marker: {name}')
+            self.spawned_entities.append(name)
+            self.markers[name] = {'local_pos': local_pos, 'size': marker_size, 'world_pos': [x, y, z]}
         except subprocess.CalledProcessError as e:
-            err = (e.stderr or e.stdout or str(e)).strip()
-            print(f'Aruco spawn failed: {err}')
-        except Exception as e:
-            print(f'Aruco spawn exception: {e}')
+            self.node.get_logger().error(f'Failed to spawn marker {name}: {e.stderr or e.stdout}')
         finally:
-            # Clean up the temp file
             os.unlink(temp_sdf_path)
+        
         return name
-def spawn_wall(name, size_x, size_y, size_z, x, y, z, roll, pitch, yaw):
-    # Delete existing wall if any
-    delete_cmd = [
-        'gz', 'service', '-s', '/world/default/remove',
-        '--reqtype', 'gz.msgs.Entity', '--reptype', 'gz.msgs.Boolean',
-        '--timeout', '1000', '--req', f'name: "{name}" type: MODEL'
-    ]
-    try:
-        result = subprocess.run(delete_cmd, capture_output=True, text=True, check=True)
-        msg = result.stdout.strip() or 'Existing wall deleted successfully'
-        print(f'Wall delete: {msg}')
-    except subprocess.CalledProcessError as e:
-        err = (e.stderr or e.stdout or str(e)).strip()
-        print(f'Wall delete failed (possibly no existing wall): {err}')
-    except Exception as e:
-        print(f'Wall delete exception: {e}')
-    
-    # Create a simple box SDF
-    sdf_content = f"""<?xml version="1.0"?>
+
+    def spawn_wall(self, name, size, local_pos):
+        """
+        Spawn a wall relative to the printer.
+        
+        Parameters:
+            name: Wall name
+            size: [size_x, size_y, size_z]
+            local_pos: [x, y, z] position in printer frame
+        
+        Returns:
+            World position [x, y, z]
+        """
+        self._delete_entity(name)
+        
+        # Create SDF (no collision for visual-only walls)
+        sdf_content = f"""<?xml version="1.0"?>
 <sdf version="1.6">
   <model name="{name}">
     <static>false</static>
@@ -120,7 +238,7 @@ def spawn_wall(name, size_x, size_y, size_z, x, y, z, roll, pitch, yaw):
       <visual name="visual">
         <geometry>
           <box>
-            <size>{size_x} {size_y} {size_z}</size>
+            <size>{size[0]} {size[1]} {size[2]}</size>
           </box>
         </geometry>
         <material>
@@ -131,376 +249,315 @@ def spawn_wall(name, size_x, size_y, size_z, x, y, z, roll, pitch, yaw):
     </link>
   </model>
 </sdf>"""
-    # Write to a temporary file
-    model_dir = '/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/'  # reuse dir
-    with tempfile.NamedTemporaryFile(dir=model_dir, mode='w', suffix='.sdf', delete=False) as temp_file:
-        temp_file.write(sdf_content)
-        temp_sdf_path = temp_file.name
-
-    cmd = [
-        'ros2', 'run', 'ros_gz_sim', 'create',
-        '-file', temp_sdf_path,
-        '-name', name,
-        '-x', str(x), '-y', str(y), '-z', str(z),
-        '-R', str(roll), '-P', str(pitch), '-Y', str(yaw)
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        msg = result.stdout.strip() or 'Wall spawn command executed successfully'
-        print(f'Wall spawn: {msg}')
-    except subprocess.CalledProcessError as e:
-        err = (e.stderr or e.stdout or str(e)).strip()
-        print(f'Wall spawn failed: {err}')
-    except Exception as e:
-        print(f'Wall spawn exception: {e}')
-    finally:
-        # Clean up the temp file
-        os.unlink(temp_sdf_path)
-    def rotate_marker_back_and_forth(name, x, y, z, initial_yaw):
-        amplitude = 0.5  # radians
-        frequency = 0.5  # Hz
-        while True:
-            t = time.time()
-            delta_yaw = amplitude * math.sin(2 * math.pi * frequency * t)
-            yaw = initial_yaw + delta_yaw
-            sin_half = math.sin(yaw / 2)
-            cos_half = math.cos(yaw / 2)
-            set_cmd = [
-                'gz', 'service', '-s', '/world/default/set_pose',
-                '--reqtype', 'gz.msgs.Pose', '--reptype', 'gz.msgs.Boolean',
-                '--timeout', '1000', '--req', f'name: "{name}" position {{ x: {x} y: {y} z: {z} }} orientation {{ x: 0 y: 0 z: {sin_half} w: {cos_half} }}'
-            ]
-            try:
-                subprocess.run(set_cmd, capture_output=True, text=True, check=True)
-                time.sleep(0.05)  # 20 fps
-            except Exception as e:
-                print(f'Error: {e}')
-                break
-
-def rotate_front_wall(name, initial_yaw, marker_name, local_marker_pos, pivot_offset, hinge_pos, hinge_ori, tf_broadcaster, node, set_pose_client):
-    amplitude = math.pi / 2  # from 0 to pi/2 relative
-    frequency = 0.2  # Hz
-    offset_to_center = -pivot_offset  # from hinge to door center
-    
-    # Create publishers for door and marker world poses (for other ROS2 nodes to use)
-    door_pose_pub = node.create_publisher(PoseStamped, '/door_world_pose', 10)
-    marker_pose_pub = node.create_publisher(PoseStamped, '/marker_world_pose', 10)
-    
-    while True:
-        t = time.time()
-        # Negative rotation to swing door outward (away from printer)
-        delta_yaw = -amplitude * (math.sin(2 * math.pi * frequency * t) + 1) / 2  # oscillate between 0 and -pi/2
-        # Compute rotated offset in hinge frame
-        cos_y = math.cos(delta_yaw)
-        sin_y = math.sin(delta_yaw)
-        rotated_offset = np.array([cos_y * offset_to_center[0] - sin_y * offset_to_center[1],
-                                   sin_y * offset_to_center[0] + cos_y * offset_to_center[1],
-                                   offset_to_center[2]])
-        rotated_offset = [float(x) for x in rotated_offset]
-        # Door position in world: hinge_pos + rotate rotated_offset by hinge_ori
-        door_pos = np.array(hinge_pos) + rotate_vector_by_quaternion(rotated_offset, hinge_ori)
-        # Door orientation: hinge_ori * q_delta
-        q_delta = tf_transformations.quaternion_from_euler(0, 0, delta_yaw)
-        q_delta = [float(x) for x in q_delta]
-        door_ori = tf_transformations.quaternion_multiply(hinge_ori, q_delta)
-        door_ori = [float(x) for x in door_ori]
         
-        # Compute marker position and orientation
-        marker_pos = door_pos + rotate_vector_by_quaternion(local_marker_pos, door_ori)
-        marker_ori = door_ori
+        with tempfile.NamedTemporaryFile(dir=self.model_dir, mode='w', suffix='.sdf', delete=False) as temp_file:
+            temp_file.write(sdf_content)
+            temp_sdf_path = temp_file.name
         
-        # Update Gazebo poses using ROS2 service calls (non-blocking)
-        # Set door pose
-        door_request = SetEntityPose.Request()
-        door_request.entity = Entity()
-        door_request.entity.name = name
-        door_request.entity.type = Entity.MODEL
-        door_request.pose = Pose()
-        door_request.pose.position = Point(x=float(door_pos[0]), y=float(door_pos[1]), z=float(door_pos[2]))
-        door_request.pose.orientation = Quaternion(x=float(door_ori[0]), y=float(door_ori[1]), z=float(door_ori[2]), w=float(door_ori[3]))
+        x, y, z = self._transform_point_to_world(*local_pos)
+        roll, pitch, yaw = float(self.orient[0]), float(self.orient[1]), float(self.orient[2])
         
-        # Set marker pose
-        marker_request = SetEntityPose.Request()
-        marker_request.entity = Entity()
-        marker_request.entity.name = marker_name
-        marker_request.entity.type = Entity.MODEL
-        marker_request.pose = Pose()
-        marker_request.pose.position = Point(x=float(marker_pos[0]), y=float(marker_pos[1]), z=float(marker_pos[2]))
-        marker_request.pose.orientation = Quaternion(x=float(marker_ori[0]), y=float(marker_ori[1]), z=float(marker_ori[2]), w=float(marker_ori[3]))
+        cmd = [
+            'ros2', 'run', 'ros_gz_sim', 'create',
+            '-file', temp_sdf_path, '-name', name,
+            '-x', str(x), '-y', str(y), '-z', str(z),
+            '-R', str(roll), '-P', str(pitch), '-Y', str(yaw)
+        ]
         
-        # Call services asynchronously (non-blocking)
         try:
-            set_pose_client.call_async(door_request)
-            set_pose_client.call_async(marker_request)
-        except Exception as e:
-            node.get_logger().warn(f'Failed to set pose: {e}')
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            self.node.get_logger().info(f'Spawned wall: {name}')
+            self.spawned_entities.append(name)
+            self.walls[name] = {'local_pos': local_pos, 'size': size, 'world_pos': [x, y, z]}
+        except subprocess.CalledProcessError as e:
+            self.node.get_logger().error(f'Failed to spawn wall {name}: {e.stderr or e.stdout}')
+        finally:
+            os.unlink(temp_sdf_path)
         
-        # Publish world poses for other nodes to consume
-        door_pose_msg = PoseStamped()
-        door_pose_msg.header.stamp = node.get_clock().now().to_msg()
-        door_pose_msg.header.frame_id = "world"
-        door_pose_msg.pose.position.x = float(door_pos[0])
-        door_pose_msg.pose.position.y = float(door_pos[1])
-        door_pose_msg.pose.position.z = float(door_pos[2])
-        door_pose_msg.pose.orientation.x = float(door_ori[0])
-        door_pose_msg.pose.orientation.y = float(door_ori[1])
-        door_pose_msg.pose.orientation.z = float(door_ori[2])
-        door_pose_msg.pose.orientation.w = float(door_ori[3])
-        door_pose_pub.publish(door_pose_msg)
+        return [x, y, z]
+
+    def spawn_all_walls(self):
+        """Spawn all printer walls (bottom, top, left, right, front, back)."""
+        t = self.wall_thickness
+        w, d, h = self.width, self.depth, self.height
         
-        marker_pose_msg = PoseStamped()
-        marker_pose_msg.header.stamp = node.get_clock().now().to_msg()
-        marker_pose_msg.header.frame_id = "world"
-        marker_pose_msg.pose.position.x = float(marker_pos[0])
-        marker_pose_msg.pose.position.y = float(marker_pos[1])
-        marker_pose_msg.pose.position.z = float(marker_pos[2])
-        marker_pose_msg.pose.orientation.x = float(marker_ori[0])
-        marker_pose_msg.pose.orientation.y = float(marker_ori[1])
-        marker_pose_msg.pose.orientation.z = float(marker_ori[2])
-        marker_pose_msg.pose.orientation.w = float(marker_ori[3])
-        marker_pose_pub.publish(marker_pose_msg)
+        wall_configs = [
+            ("bottom", [w, d, t], [0, 0, -h/2]),
+            ("top", [w, d, t], [0, 0, h/2]),
+            ("left", [t, d, h], [-w/2, 0, 0]),
+            ("right", [t, d, h], [w/2, 0, 0]),
+            ("front", [w, t, h], [0, -d/2, 0]),
+            ("back", [w, t, h], [0, d/2, 0]),
+        ]
+        
+        for name, size, local_pos in wall_configs:
+            self.spawn_wall(name, size, local_pos)
 
-        # Broadcast TF frames for visualization and coordinate transforms
-        door_transform = TransformStamped()
-        door_transform.header.stamp = node.get_clock().now().to_msg()
-        door_transform.header.frame_id = "hinge_frame"
-        door_transform.child_frame_id = "door_frame"
-        door_transform.transform.translation.x = rotated_offset[0]
-        door_transform.transform.translation.y = rotated_offset[1]
-        door_transform.transform.translation.z = rotated_offset[2]
-        door_transform.transform.rotation.x = q_delta[0]
-        door_transform.transform.rotation.y = q_delta[1]
-        door_transform.transform.rotation.z = q_delta[2]
-        door_transform.transform.rotation.w = q_delta[3]
-        tf_broadcaster.sendTransform(door_transform)
+    def spawn_door_marker(self, texture_path, marker_size):
+        """
+        Spawn a marker attached to the front door.
+        
+        Parameters:
+            texture_path: Path to the marker texture
+            marker_size: Size of the marker
+        
+        Returns:
+            Marker name
+        """
+        # Position at center of front face, slightly outside
+        local_pos = [0, -self.depth/2 - self.wall_thickness/2, 0]
+        return self.spawn_aruco_marker(texture_path, marker_size, local_pos, "door_marker")
 
-        marker_transform = TransformStamped()
-        marker_transform.header.stamp = node.get_clock().now().to_msg()
-        marker_transform.header.frame_id = "door_frame"
-        marker_transform.child_frame_id = "marker_frame"
-        marker_transform.transform.translation.x = float(local_marker_pos[0])
-        marker_transform.transform.translation.y = float(local_marker_pos[1])
-        marker_transform.transform.translation.z = float(local_marker_pos[2])
-        marker_transform.transform.rotation.x = 0.0
-        marker_transform.transform.rotation.y = 0.0
-        marker_transform.transform.rotation.z = 0.0
-        marker_transform.transform.rotation.w = 1.0
-        tf_broadcaster.sendTransform(marker_transform)
+    def _animate_door(self, door_name, marker_name, local_marker_pos):
+        """Animation loop for the swinging door."""
+        offset_to_center = np.array([self.width/2, 0, 0])  # from hinge to door center
+        
+        # Compute hinge position in world
+        hinge_local = [-self.width/2, -self.depth/2, 0]
+        hinge_world = list(self._transform_point_to_world(*hinge_local))
+        
+        # Broadcast hinge frame
+        hinge_transform = TransformStamped()
+        hinge_transform.header.frame_id = "world"
+        hinge_transform.child_frame_id = "hinge_frame"
+        hinge_transform.transform.translation.x = hinge_world[0]
+        hinge_transform.transform.translation.y = hinge_world[1]
+        hinge_transform.transform.translation.z = hinge_world[2]
+        hinge_transform.transform.rotation.x = self.q[0]
+        hinge_transform.transform.rotation.y = self.q[1]
+        hinge_transform.transform.rotation.z = self.q[2]
+        hinge_transform.transform.rotation.w = self.q[3]
+        
+        while self.running:
+            t = time.time()
+            # Oscillate between 0 and -amplitude
+            delta_yaw = -self.door_amplitude * (math.sin(2 * math.pi * self.door_frequency * t) + 1) / 2
+            
+            # Compute rotated offset
+            cos_y, sin_y = math.cos(delta_yaw), math.sin(delta_yaw)
+            rotated_offset = np.array([
+                cos_y * offset_to_center[0] - sin_y * offset_to_center[1],
+                sin_y * offset_to_center[0] + cos_y * offset_to_center[1],
+                offset_to_center[2]
+            ])
+            
+            # Door position and orientation in world
+            door_pos = np.array(hinge_world) + rotate_vector_by_quaternion(rotated_offset, self.q)
+            q_delta = tf_transformations.quaternion_from_euler(0, 0, delta_yaw)
+            door_ori = tf_transformations.quaternion_multiply(self.q, q_delta)
+            door_ori = [float(x) for x in door_ori]
+            
+            # Marker position and orientation (with extra 90° rotation)
+            marker_pos = door_pos + rotate_vector_by_quaternion(local_marker_pos, door_ori)
+            q_marker_offset = tf_transformations.quaternion_from_euler(0, 0, math.pi/2)
+            marker_ori = tf_transformations.quaternion_multiply(door_ori, q_marker_offset)
+            marker_ori = [float(x) for x in marker_ori]
+            
+            # Update Gazebo poses via service
+            if self.set_pose_client:
+                try:
+                    # Door pose
+                    door_request = SetEntityPose.Request()
+                    door_request.entity = Entity()
+                    door_request.entity.name = door_name
+                    door_request.entity.type = Entity.MODEL
+                    door_request.pose = Pose()
+                    door_request.pose.position = Point(x=float(door_pos[0]), y=float(door_pos[1]), z=float(door_pos[2]))
+                    door_request.pose.orientation = Quaternion(x=float(door_ori[0]), y=float(door_ori[1]), z=float(door_ori[2]), w=float(door_ori[3]))
+                    self.set_pose_client.call_async(door_request)
+                    
+                    # Marker pose
+                    marker_request = SetEntityPose.Request()
+                    marker_request.entity = Entity()
+                    marker_request.entity.name = marker_name
+                    marker_request.entity.type = Entity.MODEL
+                    marker_request.pose = Pose()
+                    marker_request.pose.position = Point(x=float(marker_pos[0]), y=float(marker_pos[1]), z=float(marker_pos[2]))
+                    marker_request.pose.orientation = Quaternion(x=float(marker_ori[0]), y=float(marker_ori[1]), z=float(marker_ori[2]), w=float(marker_ori[3]))
+                    self.set_pose_client.call_async(marker_request)
+                except Exception as e:
+                    self.node.get_logger().warn(f'Failed to set pose: {e}')
+            
+            # Publish poses for other nodes
+            if self.door_pose_pub:
+                door_msg = PoseStamped()
+                door_msg.header.stamp = self.node.get_clock().now().to_msg()
+                door_msg.header.frame_id = "world"
+                door_msg.pose.position = Point(x=float(door_pos[0]), y=float(door_pos[1]), z=float(door_pos[2]))
+                door_msg.pose.orientation = Quaternion(x=float(door_ori[0]), y=float(door_ori[1]), z=float(door_ori[2]), w=float(door_ori[3]))
+                self.door_pose_pub.publish(door_msg)
+            
+            if self.marker_pose_pub:
+                marker_msg = PoseStamped()
+                marker_msg.header.stamp = self.node.get_clock().now().to_msg()
+                marker_msg.header.frame_id = "world"
+                marker_msg.pose.position = Point(x=float(marker_pos[0]), y=float(marker_pos[1]), z=float(marker_pos[2]))
+                marker_msg.pose.orientation = Quaternion(x=float(marker_ori[0]), y=float(marker_ori[1]), z=float(marker_ori[2]), w=float(marker_ori[3]))
+                self.marker_pose_pub.publish(marker_msg)
+            
+            # Broadcast TF frames
+            hinge_transform.header.stamp = self.node.get_clock().now().to_msg()
+            self.tf_broadcaster.sendTransform(hinge_transform)
+            
+            door_transform = TransformStamped()
+            door_transform.header.stamp = self.node.get_clock().now().to_msg()
+            door_transform.header.frame_id = "hinge_frame"
+            door_transform.child_frame_id = "door_frame"
+            door_transform.transform.translation.x = float(rotated_offset[0])
+            door_transform.transform.translation.y = float(rotated_offset[1])
+            door_transform.transform.translation.z = float(rotated_offset[2])
+            door_transform.transform.rotation.x = float(q_delta[0])
+            door_transform.transform.rotation.y = float(q_delta[1])
+            door_transform.transform.rotation.z = float(q_delta[2])
+            door_transform.transform.rotation.w = float(q_delta[3])
+            self.tf_broadcaster.sendTransform(door_transform)
+            
+            marker_transform = TransformStamped()
+            marker_transform.header.stamp = self.node.get_clock().now().to_msg()
+            marker_transform.header.frame_id = "door_frame"
+            marker_transform.child_frame_id = "marker_frame"
+            marker_transform.transform.translation.x = float(local_marker_pos[0])
+            marker_transform.transform.translation.y = float(local_marker_pos[1])
+            marker_transform.transform.translation.z = float(local_marker_pos[2])
+            marker_transform.transform.rotation.x = 0.0
+            marker_transform.transform.rotation.y = 0.0
+            marker_transform.transform.rotation.z = 0.0
+            marker_transform.transform.rotation.w = 1.0
+            self.tf_broadcaster.sendTransform(marker_transform)
+            
+            time.sleep(0.02)  # 50Hz
 
-        time.sleep(0.02)  # 50Hz update rate
+    def start_door_animation(self, marker_name):
+        """Start the door animation with attached marker."""
+        if self.animation_thread and self.animation_thread.is_alive():
+            self.node.get_logger().warn('Animation already running')
+            return
+        
+        # Create pose publishers
+        self.door_pose_pub = self.node.create_publisher(PoseStamped, '/door_world_pose', 10)
+        self.marker_pose_pub = self.node.create_publisher(PoseStamped, '/marker_world_pose', 10)
+        
+        # Local marker position relative to door center
+        local_marker_pos = np.array([0, -self.wall_thickness/2, 0])
+        
+        self.running = True
+        self.animation_thread = threading.Thread(
+            target=self._animate_door,
+            args=("front", marker_name, local_marker_pos),
+            daemon=True
+        )
+        self.animation_thread.start()
+        self.node.get_logger().info('Door animation started')
+
+    def stop_animation(self):
+        """Stop the door animation."""
+        self.running = False
+        if self.animation_thread:
+            self.animation_thread.join(timeout=1.0)
+        self.node.get_logger().info('Door animation stopped')
+
+    def spawn(self):
+        """Spawn the complete printer with walls and initialize TF."""
+        # Broadcast printer frame and wait for TF
+        for _ in range(10):
+            self._broadcast_printer_frame()
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+        
+        # Spawn all walls
+        self.spawn_all_walls()
+        
+        self.node.get_logger().info(f'Printer spawned at position {self.pos}')
+
+    def cleanup(self):
+        """Remove all spawned entities."""
+        self.stop_animation()
+        for name in self.spawned_entities:
+            self._delete_entity(name)
+        self.spawned_entities.clear()
+        self.markers.clear()
+        self.walls.clear()
+
 
 def main():
     rclpy.init()
-    node = Node('wall_spawner')
-    tf_broadcaster = TransformBroadcaster(node)
-    buffer = Buffer()
-    listener = TransformListener(buffer, node)
-
-    # Start the ros_gz_bridge for the set_pose service in background
+    node = Node('simulated_printer')
+    
+    # Start the ros_gz_bridge for the set_pose service
     bridge_proc = subprocess.Popen(
         ['ros2', 'run', 'ros_gz_bridge', 'parameter_bridge',
          '/world/default/set_pose@ros_gz_interfaces/srv/SetEntityPose'],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
-    node.get_logger().info('Started ros_gz_bridge for /world/default/set_pose service')
+    node.get_logger().info('Started ros_gz_bridge for set_pose service')
     
-    # Create service client for setting entity poses
+    # Create service client
     set_pose_client = node.create_client(SetEntityPose, '/world/default/set_pose')
-    
-    # Wait for the service to become available (with timeout)
-    node.get_logger().info('Waiting for /world/default/set_pose service...')
-    service_ready = set_pose_client.wait_for_service(timeout_sec=10.0)
-    if service_ready:
-        node.get_logger().info('SetEntityPose service is available')
+    node.get_logger().info('Waiting for set_pose service...')
+    if set_pose_client.wait_for_service(timeout_sec=10.0):
+        node.get_logger().info('SetEntityPose service available')
     else:
-        node.get_logger().warn('SetEntityPose service not available, poses may not update in Gazebo')
-
-    pos = np.array([0.0, -0.7, 0.1])
-    orient = np.array([0.0, 0.0, 0.5])
-    printerObj = Simulated3DPrinter(pos, orient)
-
-    # Broadcast printer frame
-    transform = TransformStamped()
-    transform.header.stamp = node.get_clock().now().to_msg()
-    transform.header.frame_id = "world"
-    transform.child_frame_id = "printer_frame"
-    transform.transform.translation.x = float(pos[0])
-    transform.transform.translation.y = float(pos[1])
-    transform.transform.translation.z = float(pos[2])
-    q = tf_transformations.quaternion_from_euler(float(orient[0]), float(orient[1]), float(orient[2]))
-    q = [float(x) for x in q]
-    q_marker = tf_transformations.quaternion_multiply(q, tf_transformations.quaternion_from_euler(0, 0, math.pi/2))
-    q_marker = [float(x) for x in q_marker]
-    transform.transform.rotation.x = q[0]
-    transform.transform.rotation.y = q[1]
-    transform.transform.rotation.z = q[2]
-    transform.transform.rotation.w = q[3]
-    tf_broadcaster.sendTransform(transform)
-
-    # Wait for tf to propagate - need multiple spins and retries
-    for _ in range(10):
-        rclpy.spin_once(node, timeout_sec=0.1)
-        tf_broadcaster.sendTransform(transform)  # Re-broadcast to ensure it's available
+        node.get_logger().warn('SetEntityPose service not available')
     
-    # Helper function to get transform with retries
-    def get_transform_with_retry(buffer, target_frame, source_frame, timeout_sec=5.0):
-        start_time = time.time()
-        while time.time() - start_time < timeout_sec:
-            try:
-                return buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
-            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
-                tf_broadcaster.sendTransform(transform)  # Keep broadcasting
-                rclpy.spin_once(node, timeout_sec=0.1)
-        raise tf2_ros.LookupException(f"Could not get transform from {source_frame} to {target_frame} after {timeout_sec}s")
-
-    # Define printer dimensions
-    printer_width = 0.3
-    printer_depth = 0.3
-    printer_height = 0.3
-    thickness = 0.01
-
-    # Spawn ArUco markers relative to printer
-    texture_path = 'materials/textures/marker6x6_0.png'
-    marker_size = 0.05
-    roll = float(orient[0])
-    pitch = float(orient[1])
-    yaw = float(orient[2]) + math.pi/2
-    # Outside front wall
-    ox = 0
-    oy = -printer_depth/2 - 0.02  # outside
-    oz = 0
-    point_stamped = PointStamped()
-    point_stamped.header.frame_id = "printer_frame"
-    point_stamped.header.stamp = node.get_clock().now().to_msg()
-    point_stamped.point.x = ox
-    point_stamped.point.y = oy
-    point_stamped.point.z = oz
-    transform = get_transform_with_retry(buffer, "world", "printer_frame")
-    transformed = tf2_geometry_msgs.do_transform_point(point_stamped, transform)
-    x = transformed.point.x
-    y = transformed.point.y
-    z = transformed.point.z
-    name1 = printerObj.spawn_aruco_marker(texture_path, marker_size, x, y, z, roll, pitch, yaw)
-    # Broadcast marker frame
-    marker_transform = TransformStamped()
-    marker_transform.header.stamp = node.get_clock().now().to_msg()
-    marker_transform.header.frame_id = "world"
-    marker_transform.child_frame_id = "marker6x6_frame"
-    marker_transform.transform.translation.x = x
-    marker_transform.transform.translation.y = y
-    marker_transform.transform.translation.z = z
-    marker_transform.transform.rotation.x = q_marker[0]
-    marker_transform.transform.rotation.y = q_marker[1]
-    marker_transform.transform.rotation.z = q_marker[2]
-    marker_transform.transform.rotation.w = q_marker[3]
-    tf_broadcaster.sendTransform(marker_transform)
-    #threading.Thread(target=rotate_marker_back_and_forth, args=(name1, x, y, z, yaw)).start()
+    # ============================================================
+    # CONFIGURATION - Edit these values to customize the printer
+    # ============================================================
+    printer_config = {
+        'pos': [0.0, -0.7, 0.1],
+        'orient': [0.0, 0.0, 0.5],  # roll, pitch, yaw in radians
+        'width': 0.3,
+        'depth': 0.3,
+        'height': 0.3,
+        'wall_thickness': 0.01,
+        'door_frequency': 0.2,  # Hz
+        'door_amplitude': math.pi / 2,  # radians
+    }
     
-    texture_path = 'materials/textures/marker4x4_0.png'
-    marker_size = 0.03
-    # At the center of the front face
-    ox = 0
-    oy = -printer_depth/2 - thickness/2  # center of front face
-    oz = 0
-    point_stamped.point.x = ox
-    point_stamped.point.y = oy
-    point_stamped.point.z = oz
-    transformed = tf2_geometry_msgs.do_transform_point(point_stamped, transform)
-    x = transformed.point.x
-    y = transformed.point.y
-    z = transformed.point.z
-    name2 = printerObj.spawn_aruco_marker(texture_path, marker_size, x, y, z, roll, pitch, yaw)
-    # Broadcast marker frame
-    marker_transform.child_frame_id = "marker4x4_frame"
-    marker_transform.transform.translation.x = x
-    marker_transform.transform.translation.y = y
-    marker_transform.transform.translation.z = z
-    marker_transform.transform.rotation.x = q_marker[0]
-    marker_transform.transform.rotation.y = q_marker[1]
-    marker_transform.transform.rotation.z = q_marker[2]
-    marker_transform.transform.rotation.w = q_marker[3]
-    tf_broadcaster.sendTransform(marker_transform)
-    #threading.Thread(target=rotate_marker_back_and_forth, args=(name2, x, y, z, yaw)).start()
-
-    # Spawn printer walls
-    roll = float(orient[0])
-    pitch = float(orient[1])
-    yaw = float(orient[2])
-
-    walls = [
-        ("bottom", 0, 0, -printer_height/2, printer_width, printer_depth, thickness),
-        ("top", 0, 0, printer_height/2, printer_width, printer_depth, thickness),
-        ("left", -printer_width/2, 0, 0, thickness, printer_depth, printer_height),
-        ("right", printer_width/2, 0, 0, thickness, printer_depth, printer_height),
-        ("front", 0, -printer_depth/2, 0, printer_width, thickness, printer_height),
-        ("back", 0, printer_depth/2, 0, printer_width, thickness, printer_height),
-    ]
-
-    front_x = front_y = front_z = front_yaw = 0
-
-    for name, ox, oy, oz, sx, sy, sz in walls:
-        # Transform offset from printer_frame to world
-        point_stamped = PointStamped()
-        point_stamped.header.frame_id = "printer_frame"
-        point_stamped.header.stamp = node.get_clock().now().to_msg()
-        point_stamped.point.x = ox
-        point_stamped.point.y = oy
-        point_stamped.point.z = oz
-        try:
-            wall_transform = get_transform_with_retry(buffer, "world", "printer_frame")
-            transformed = tf2_geometry_msgs.do_transform_point(point_stamped, wall_transform)
-            wx = transformed.point.x
-            wy = transformed.point.y
-            wz = transformed.point.z
-            spawn_wall(name, sx, sy, sz, wx, wy, wz, roll, pitch, yaw)
-            if name == "front":
-                front_x, front_y, front_z, front_yaw = wx, wy, wz, yaw
-        except Exception as e:
-            print(f"TF error for {name}: {e}")
-
-    # Broadcast hinge frame for front wall - transform hinge position from printer frame to world
-    # Hinge is at left edge of front wall in printer's local frame
-    hinge_local = PointStamped()
-    hinge_local.header.frame_id = "printer_frame"
-    hinge_local.header.stamp = node.get_clock().now().to_msg()
-    hinge_local.point.x = float(-printer_width/2)  # left edge
-    hinge_local.point.y = float(-printer_depth/2)  # front wall position
-    hinge_local.point.z = 0.0
-    hinge_transform_lookup = get_transform_with_retry(buffer, "world", "printer_frame")
-    hinge_world = tf2_geometry_msgs.do_transform_point(hinge_local, hinge_transform_lookup)
+    door_marker_config = {
+        'texture_path': 'materials/textures/marker4x4_0.png',
+        'marker_size': 0.03,
+    }
     
-    hinge_pos = [float(hinge_world.point.x), float(hinge_world.point.y), float(hinge_world.point.z)]
-    hinge_transform = TransformStamped()
-    hinge_transform.header.stamp = node.get_clock().now().to_msg()
-    hinge_transform.header.frame_id = "world"
-    hinge_transform.child_frame_id = "hinge_frame"
-    hinge_transform.transform.translation.x = hinge_pos[0]
-    hinge_transform.transform.translation.y = hinge_pos[1]
-    hinge_transform.transform.translation.z = hinge_pos[2]
-    hinge_transform.transform.rotation.x = q[0]
-    hinge_transform.transform.rotation.y = q[1]
-    hinge_transform.transform.rotation.z = q[2]
-    hinge_transform.transform.rotation.w = q[3]
-    tf_broadcaster.sendTransform(hinge_transform)
-
-    hinge_ori = q
-
-    # Start rotating the front wall
-    pivot_offset = np.array([-printer_width/2, 0, 0])  # rotate about left edge
-    local_marker_pos = np.array([0, -thickness/2, 0])  # marker at center of front face relative to wall
-    threading.Thread(target=rotate_front_wall, args=("front", front_yaw, name2, local_marker_pos, pivot_offset, hinge_pos, hinge_ori, tf_broadcaster, node, set_pose_client)).start()
-
-    # Keep the node alive
+    # Optional: additional static marker
+    static_marker_config = {
+        'texture_path': 'materials/textures/marker6x6_0.png',
+        'marker_size': 0.05,
+        'local_pos': [0, -0.15 - 0.02, 0],  # Outside front wall
+    }
+    # ============================================================
+    
+    # Create and spawn the printer
+    printer = Simulated3DPrinter(node, **printer_config)
+    printer.setup_pose_service(set_pose_client)
+    printer.spawn()
+    
+    # Spawn optional static marker
+    if static_marker_config:
+        printer.spawn_aruco_marker(
+            static_marker_config['texture_path'],
+            static_marker_config['marker_size'],
+            static_marker_config['local_pos']
+        )
+    
+    # Spawn door marker and start animation
+    door_marker_name = printer.spawn_door_marker(
+        door_marker_config['texture_path'],
+        door_marker_config['marker_size']
+    )
+    printer.start_door_animation(door_marker_name)
+    
+    # Keep node alive
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
-        # Cleanup: terminate the bridge process
+        printer.cleanup()
         bridge_proc.terminate()
         bridge_proc.wait()
         node.destroy_node()
         rclpy.shutdown()
-    
+
 
 if __name__ == '__main__':
     main()
