@@ -7,12 +7,15 @@ import threading
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
-from geometry_msgs.msg import TransformStamped, PointStamped
+from geometry_msgs.msg import TransformStamped, PointStamped, PoseStamped, Pose, Point, Quaternion
 from std_msgs.msg import Header
 import tf_transformations
 import tf2_geometry_msgs
 import tf2_ros
+from ros_gz_interfaces.srv import SetEntityPose
+from ros_gz_interfaces.msg import Entity
 
 
 def rotate_vector_by_quaternion(v, q):
@@ -174,13 +177,19 @@ def spawn_wall(name, size_x, size_y, size_z, x, y, z, roll, pitch, yaw):
                 print(f'Error: {e}')
                 break
 
-def rotate_front_wall(name, initial_yaw, marker_name, local_marker_pos, pivot_offset, hinge_pos, hinge_ori, tf_broadcaster, node):
+def rotate_front_wall(name, initial_yaw, marker_name, local_marker_pos, pivot_offset, hinge_pos, hinge_ori, tf_broadcaster, node, set_pose_client):
     amplitude = math.pi / 2  # from 0 to pi/2 relative
     frequency = 0.2  # Hz
     offset_to_center = -pivot_offset  # from hinge to door center
+    
+    # Create publishers for door and marker world poses (for other ROS2 nodes to use)
+    door_pose_pub = node.create_publisher(PoseStamped, '/door_world_pose', 10)
+    marker_pose_pub = node.create_publisher(PoseStamped, '/marker_world_pose', 10)
+    
     while True:
         t = time.time()
-        delta_yaw = amplitude * (math.sin(2 * math.pi * frequency * t) + 1) / 2  # oscillate between 0 and pi/2
+        # Negative rotation to swing door outward (away from printer)
+        delta_yaw = -amplitude * (math.sin(2 * math.pi * frequency * t) + 1) / 2  # oscillate between 0 and -pi/2
         # Compute rotated offset in hinge frame
         cos_y = math.cos(delta_yaw)
         sin_y = math.sin(delta_yaw)
@@ -196,27 +205,62 @@ def rotate_front_wall(name, initial_yaw, marker_name, local_marker_pos, pivot_of
         door_ori = tf_transformations.quaternion_multiply(hinge_ori, q_delta)
         door_ori = [float(x) for x in door_ori]
         
-        # Set door pose
-        set_cmd = [
-            'gz', 'service', '-s', '/world/default/set_pose',
-            '--reqtype', 'gz.msgs.Pose', '--reptype', 'gz.msgs.Boolean',
-            '--timeout', '1000', '--req', f'name: "{name}" position {{ x: {float(door_pos[0])} y: {float(door_pos[1])} z: {float(door_pos[2])} }} orientation {{ x: {float(door_ori[0])} y: {float(door_ori[1])} z: {float(door_ori[2])} w: {float(door_ori[3])} }}'
-        ]
-        subprocess.run(set_cmd, capture_output=True, text=True, check=True)
-
         # Compute marker position and orientation
         marker_pos = door_pos + rotate_vector_by_quaternion(local_marker_pos, door_ori)
-        marker_ori = door_ori  # relative identity
+        marker_ori = door_ori
+        
+        # Update Gazebo poses using ROS2 service calls (non-blocking)
+        # Set door pose
+        door_request = SetEntityPose.Request()
+        door_request.entity = Entity()
+        door_request.entity.name = name
+        door_request.entity.type = Entity.MODEL
+        door_request.pose = Pose()
+        door_request.pose.position = Point(x=float(door_pos[0]), y=float(door_pos[1]), z=float(door_pos[2]))
+        door_request.pose.orientation = Quaternion(x=float(door_ori[0]), y=float(door_ori[1]), z=float(door_ori[2]), w=float(door_ori[3]))
         
         # Set marker pose
-        marker_set_cmd = [
-            'gz', 'service', '-s', '/world/default/set_pose',
-            '--reqtype', 'gz.msgs.Pose', '--reptype', 'gz.msgs.Boolean',
-            '--timeout', '1000', '--req', f'name: "{marker_name}" position {{ x: {float(marker_pos[0])} y: {float(marker_pos[1])} z: {float(marker_pos[2])} }} orientation {{ x: {float(marker_ori[0])} y: {float(marker_ori[1])} z: {float(marker_ori[2])} w: {float(marker_ori[3])} }}'
-        ]
-        subprocess.run(marker_set_cmd, capture_output=True, text=True, check=True)
+        marker_request = SetEntityPose.Request()
+        marker_request.entity = Entity()
+        marker_request.entity.name = marker_name
+        marker_request.entity.type = Entity.MODEL
+        marker_request.pose = Pose()
+        marker_request.pose.position = Point(x=float(marker_pos[0]), y=float(marker_pos[1]), z=float(marker_pos[2]))
+        marker_request.pose.orientation = Quaternion(x=float(marker_ori[0]), y=float(marker_ori[1]), z=float(marker_ori[2]), w=float(marker_ori[3]))
+        
+        # Call services asynchronously (non-blocking)
+        try:
+            set_pose_client.call_async(door_request)
+            set_pose_client.call_async(marker_request)
+        except Exception as e:
+            node.get_logger().warn(f'Failed to set pose: {e}')
+        
+        # Publish world poses for other nodes to consume
+        door_pose_msg = PoseStamped()
+        door_pose_msg.header.stamp = node.get_clock().now().to_msg()
+        door_pose_msg.header.frame_id = "world"
+        door_pose_msg.pose.position.x = float(door_pos[0])
+        door_pose_msg.pose.position.y = float(door_pos[1])
+        door_pose_msg.pose.position.z = float(door_pos[2])
+        door_pose_msg.pose.orientation.x = float(door_ori[0])
+        door_pose_msg.pose.orientation.y = float(door_ori[1])
+        door_pose_msg.pose.orientation.z = float(door_ori[2])
+        door_pose_msg.pose.orientation.w = float(door_ori[3])
+        door_pose_pub.publish(door_pose_msg)
+        
+        marker_pose_msg = PoseStamped()
+        marker_pose_msg.header.stamp = node.get_clock().now().to_msg()
+        marker_pose_msg.header.frame_id = "world"
+        marker_pose_msg.pose.position.x = float(marker_pos[0])
+        marker_pose_msg.pose.position.y = float(marker_pos[1])
+        marker_pose_msg.pose.position.z = float(marker_pos[2])
+        marker_pose_msg.pose.orientation.x = float(marker_ori[0])
+        marker_pose_msg.pose.orientation.y = float(marker_ori[1])
+        marker_pose_msg.pose.orientation.z = float(marker_ori[2])
+        marker_pose_msg.pose.orientation.w = float(marker_ori[3])
+        marker_pose_pub.publish(marker_pose_msg)
 
-        # Optionally broadcast tf frames for visualization
+        # Broadcast TF frames for visualization and coordinate transforms
         door_transform = TransformStamped()
         door_transform.header.stamp = node.get_clock().now().to_msg()
         door_transform.header.frame_id = "hinge_frame"
@@ -237,13 +281,13 @@ def rotate_front_wall(name, initial_yaw, marker_name, local_marker_pos, pivot_of
         marker_transform.transform.translation.x = float(local_marker_pos[0])
         marker_transform.transform.translation.y = float(local_marker_pos[1])
         marker_transform.transform.translation.z = float(local_marker_pos[2])
-        marker_transform.transform.rotation.x = 0
-        marker_transform.transform.rotation.y = 0
-        marker_transform.transform.rotation.z = 0
-        marker_transform.transform.rotation.w = 1
+        marker_transform.transform.rotation.x = 0.0
+        marker_transform.transform.rotation.y = 0.0
+        marker_transform.transform.rotation.z = 0.0
+        marker_transform.transform.rotation.w = 1.0
         tf_broadcaster.sendTransform(marker_transform)
 
-        time.sleep(0.02)
+        time.sleep(0.02)  # 50Hz update rate
 
 def main():
     rclpy.init()
@@ -252,8 +296,28 @@ def main():
     buffer = Buffer()
     listener = TransformListener(buffer, node)
 
-    pos = [0.0, -0.7, 0.1]
-    orient = [0.0, 0.0, 0.5]
+    # Start the ros_gz_bridge for the set_pose service in background
+    bridge_proc = subprocess.Popen(
+        ['ros2', 'run', 'ros_gz_bridge', 'parameter_bridge',
+         '/world/default/set_pose@ros_gz_interfaces/srv/SetEntityPose'],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+    node.get_logger().info('Started ros_gz_bridge for /world/default/set_pose service')
+    
+    # Create service client for setting entity poses
+    set_pose_client = node.create_client(SetEntityPose, '/world/default/set_pose')
+    
+    # Wait for the service to become available (with timeout)
+    node.get_logger().info('Waiting for /world/default/set_pose service...')
+    service_ready = set_pose_client.wait_for_service(timeout_sec=10.0)
+    if service_ready:
+        node.get_logger().info('SetEntityPose service is available')
+    else:
+        node.get_logger().warn('SetEntityPose service not available, poses may not update in Gazebo')
+
+    pos = np.array([0.0, -0.7, 0.1])
+    orient = np.array([0.0, 0.0, 0.5])
     printerObj = Simulated3DPrinter(pos, orient)
 
     # Broadcast printer frame
@@ -274,8 +338,21 @@ def main():
     transform.transform.rotation.w = q[3]
     tf_broadcaster.sendTransform(transform)
 
-    # Wait for tf to propagate
-    rclpy.spin_once(node, timeout_sec=0.1)
+    # Wait for tf to propagate - need multiple spins and retries
+    for _ in range(10):
+        rclpy.spin_once(node, timeout_sec=0.1)
+        tf_broadcaster.sendTransform(transform)  # Re-broadcast to ensure it's available
+    
+    # Helper function to get transform with retries
+    def get_transform_with_retry(buffer, target_frame, source_frame, timeout_sec=5.0):
+        start_time = time.time()
+        while time.time() - start_time < timeout_sec:
+            try:
+                return buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+                tf_broadcaster.sendTransform(transform)  # Keep broadcasting
+                rclpy.spin_once(node, timeout_sec=0.1)
+        raise tf2_ros.LookupException(f"Could not get transform from {source_frame} to {target_frame} after {timeout_sec}s")
 
     # Define printer dimensions
     printer_width = 0.3
@@ -299,7 +376,7 @@ def main():
     point_stamped.point.x = ox
     point_stamped.point.y = oy
     point_stamped.point.z = oz
-    transform = buffer.lookup_transform("world", "printer_frame", rclpy.time.Time())
+    transform = get_transform_with_retry(buffer, "world", "printer_frame")
     transformed = tf2_geometry_msgs.do_transform_point(point_stamped, transform)
     x = transformed.point.x
     y = transformed.point.y
@@ -318,8 +395,7 @@ def main():
     marker_transform.transform.rotation.z = q_marker[2]
     marker_transform.transform.rotation.w = q_marker[3]
     tf_broadcaster.sendTransform(marker_transform)
-
-    rclpy.spin_once(node, timeout_sec=0.01)
+    #threading.Thread(target=rotate_marker_back_and_forth, args=(name1, x, y, z, yaw)).start()
     
     texture_path = 'materials/textures/marker4x4_0.png'
     marker_size = 0.03
@@ -345,8 +421,7 @@ def main():
     marker_transform.transform.rotation.z = q_marker[2]
     marker_transform.transform.rotation.w = q_marker[3]
     tf_broadcaster.sendTransform(marker_transform)
-
-    rclpy.spin_once(node, timeout_sec=0.01)
+    #threading.Thread(target=rotate_marker_back_and_forth, args=(name2, x, y, z, yaw)).start()
 
     # Spawn printer walls
     roll = float(orient[0])
@@ -373,8 +448,8 @@ def main():
         point_stamped.point.y = oy
         point_stamped.point.z = oz
         try:
-            transform = buffer.lookup_transform("world", "printer_frame", rclpy.time.Time())
-            transformed = tf2_geometry_msgs.do_transform_point(point_stamped, transform)
+            wall_transform = get_transform_with_retry(buffer, "world", "printer_frame")
+            transformed = tf2_geometry_msgs.do_transform_point(point_stamped, wall_transform)
             wx = transformed.point.x
             wy = transformed.point.y
             wz = transformed.point.z
@@ -384,9 +459,18 @@ def main():
         except Exception as e:
             print(f"TF error for {name}: {e}")
 
-    # Broadcast hinge frame for front wall
-    hinge_pos = np.array([front_x - printer_width/2, front_y, front_z])  # left edge
-    hinge_pos = [float(x) for x in hinge_pos]
+    # Broadcast hinge frame for front wall - transform hinge position from printer frame to world
+    # Hinge is at left edge of front wall in printer's local frame
+    hinge_local = PointStamped()
+    hinge_local.header.frame_id = "printer_frame"
+    hinge_local.header.stamp = node.get_clock().now().to_msg()
+    hinge_local.point.x = float(-printer_width/2)  # left edge
+    hinge_local.point.y = float(-printer_depth/2)  # front wall position
+    hinge_local.point.z = 0.0
+    hinge_transform_lookup = get_transform_with_retry(buffer, "world", "printer_frame")
+    hinge_world = tf2_geometry_msgs.do_transform_point(hinge_local, hinge_transform_lookup)
+    
+    hinge_pos = [float(hinge_world.point.x), float(hinge_world.point.y), float(hinge_world.point.z)]
     hinge_transform = TransformStamped()
     hinge_transform.header.stamp = node.get_clock().now().to_msg()
     hinge_transform.header.frame_id = "world"
@@ -400,23 +484,22 @@ def main():
     hinge_transform.transform.rotation.w = q[3]
     tf_broadcaster.sendTransform(hinge_transform)
 
-    rclpy.spin_once(node, timeout_sec=0.01)
-
-    hinge_pos = [hinge_transform.transform.translation.x,
-                 hinge_transform.transform.translation.y,
-                 hinge_transform.transform.translation.z]
     hinge_ori = q
 
     # Start rotating the front wall
     pivot_offset = np.array([-printer_width/2, 0, 0])  # rotate about left edge
     local_marker_pos = np.array([0, -thickness/2, 0])  # marker at center of front face relative to wall
-    threading.Thread(target=rotate_front_wall, args=("front", front_yaw, name2, local_marker_pos, pivot_offset, hinge_pos, hinge_ori, tf_broadcaster, node)).start()
+    threading.Thread(target=rotate_front_wall, args=("front", front_yaw, name2, local_marker_pos, pivot_offset, hinge_pos, hinge_ori, tf_broadcaster, node, set_pose_client)).start()
 
     # Keep the node alive
-    rclpy.spin(node)
-
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    finally:
+        # Cleanup: terminate the bridge process
+        bridge_proc.terminate()
+        bridge_proc.wait()
+        node.destroy_node()
+        rclpy.shutdown()
     
 
 if __name__ == '__main__':
