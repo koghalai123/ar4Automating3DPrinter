@@ -29,25 +29,56 @@ class Simulated3DPrinter:
     """
     A simulated 3D printer with walls, a swinging door, and ArUco markers.
     
+    Simple usage:
+        rclpy.init()
+        printer = Simulated3DPrinter()
+        printer.spawn_complete()
+        rclpy.spin(printer.node)
+    
     Parameters:
-        node: ROS2 node for communication
+        node: ROS2 node (created automatically if None)
         pos: Position [x, y, z] in world frame
         orient: Orientation [roll, pitch, yaw] in radians
-        width: Printer width (default 0.3)
-        depth: Printer depth (default 0.3)
-        height: Printer height (default 0.3)
-        wall_thickness: Wall thickness (default 0.01)
-        door_frequency: Door oscillation frequency in Hz (default 0.2)
-        door_amplitude: Door swing amplitude in radians (default pi/2)
-        model_dir: Directory for temporary SDF files
+        width: Printer width
+        depth: Printer depth
+        height: Printer height
+        wall_thickness: Wall thickness
+        door_frequency: Door oscillation frequency in Hz
+        door_amplitude: Door swing amplitude in radians
+        door_marker_texture: Texture path for door marker
+        door_marker_size: Size of door marker
+        static_marker_texture: Texture path for static marker (None to disable)
+        static_marker_size: Size of static marker
+        enable_door_flapping_animation: Whether to animate the door
     """
     
-    def __init__(self, node, pos, orient, width=0.3, depth=0.3, height=0.3,
-                 wall_thickness=0.01, door_frequency=0.2, door_amplitude=math.pi/2,
-                 model_dir='/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/',
-                 aruco_sdf_path='/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf'):
+    # Default paths
+    DEFAULT_MODEL_DIR = '/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/'
+    DEFAULT_ARUCO_SDF = '/home/koghalai/ar4_ws/src/ar4Automating3DPrinter/models/aruco_marker/model.sdf'
+    
+    def __init__(
+        self,
+        node=None,
+        pos=(0.0, -0.7, 0.1),
+        orient=(0.0, 0.0, 0.5),
+        width=0.3,
+        depth=0.3,
+        height=0.3,
+        wall_thickness=0.01,
+        door_frequency=0.2,
+        door_amplitude=math.pi / 2,
+        door_marker_texture='materials/textures/marker4x4_0.png',
+        door_marker_size=0.03,
+        static_marker_texture='materials/textures/marker6x6_0.png',
+        static_marker_size=0.05,
+        enable_door_flapping_animation=False,
+        model_dir=None,
+        aruco_sdf_path=None
+    ):
+        # Create node if not provided
+        self._owns_node = node is None
+        self.node = node if node else Node('simulated_printer')
         
-        self.node = node
         self.pos = np.array(pos)
         self.orient = np.array(orient)
         self.width = width
@@ -56,16 +87,24 @@ class Simulated3DPrinter:
         self.wall_thickness = wall_thickness
         self.door_frequency = door_frequency
         self.door_amplitude = door_amplitude
-        self.model_dir = model_dir
-        self.aruco_sdf_path = aruco_sdf_path
+        self.model_dir = model_dir or self.DEFAULT_MODEL_DIR
+        self.aruco_sdf_path = aruco_sdf_path or self.DEFAULT_ARUCO_SDF
+        
+        # Marker configuration
+        self.door_marker_texture = door_marker_texture
+        self.door_marker_size = door_marker_size
+        self.static_marker_texture = static_marker_texture
+        self.static_marker_size = static_marker_size
+        self.enable_door_flapping_animation = enable_door_flapping_animation
         
         # TF components
-        self.tf_broadcaster = TransformBroadcaster(node)
+        self.tf_broadcaster = TransformBroadcaster(self.node)
         self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, node)
+        self.tf_listener = TransformListener(self.tf_buffer, self.node)
         
-        # Service client for setting poses (will be set up later)
+        # Service client and bridge process
         self.set_pose_client = None
+        self._bridge_proc = None
         
         # Compute quaternions
         self.q = tf_transformations.quaternion_from_euler(
@@ -90,9 +129,22 @@ class Simulated3DPrinter:
         self.animation_thread = None
         self.running = False
 
-    def setup_pose_service(self, set_pose_client):
-        """Set the service client for pose updates."""
-        self.set_pose_client = set_pose_client
+    def _setup_pose_service(self):
+        """Initialize the ros_gz_bridge and service client."""
+        self._bridge_proc = subprocess.Popen(
+            ['ros2', 'run', 'ros_gz_bridge', 'parameter_bridge',
+             '/world/default/set_pose@ros_gz_interfaces/srv/SetEntityPose'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        self.node.get_logger().info('Started ros_gz_bridge for set_pose service')
+        
+        self.set_pose_client = self.node.create_client(SetEntityPose, '/world/default/set_pose')
+        self.node.get_logger().info('Waiting for set_pose service...')
+        if self.set_pose_client.wait_for_service(timeout_sec=10.0):
+            self.node.get_logger().info('SetEntityPose service available')
+        else:
+            self.node.get_logger().warn('SetEntityPose service not available')
 
     def _broadcast_printer_frame(self):
         """Broadcast the printer's TF frame."""
@@ -427,7 +479,123 @@ class Simulated3DPrinter:
             
             time.sleep(0.02)  # 50Hz
 
-    def start_door_animation(self, marker_name):
+    def _set_door_angle(self, door_name, marker_name, angle):
+        """Set the door to a specific angle (0 = closed, -amplitude = fully open)."""
+        offset_to_center = np.array([self.width/2, 0, 0])
+        local_marker_pos = np.array([0, -self.wall_thickness/2, 0])
+        
+        # Compute hinge position in world
+        hinge_local = [-self.width/2, -self.depth/2, 0]
+        hinge_world = list(self._transform_point_to_world(*hinge_local))
+        
+        # Compute rotated offset
+        cos_y, sin_y = math.cos(angle), math.sin(angle)
+        rotated_offset = np.array([
+            cos_y * offset_to_center[0] - sin_y * offset_to_center[1],
+            sin_y * offset_to_center[0] + cos_y * offset_to_center[1],
+            offset_to_center[2]
+        ])
+        
+        # Door position and orientation in world
+        door_pos = np.array(hinge_world) + rotate_vector_by_quaternion(rotated_offset, self.q)
+        q_delta = tf_transformations.quaternion_from_euler(0, 0, angle)
+        door_ori = tf_transformations.quaternion_multiply(self.q, q_delta)
+        door_ori = [float(x) for x in door_ori]
+        
+        # Marker position and orientation (with extra 90° rotation)
+        marker_pos = door_pos + rotate_vector_by_quaternion(local_marker_pos, door_ori)
+        q_marker_offset = tf_transformations.quaternion_from_euler(0, 0, math.pi/2)
+        marker_ori = tf_transformations.quaternion_multiply(door_ori, q_marker_offset)
+        marker_ori = [float(x) for x in marker_ori]
+        
+        # Update Gazebo poses via service
+        if self.set_pose_client:
+            try:
+                # Door pose
+                door_request = SetEntityPose.Request()
+                door_request.entity = Entity()
+                door_request.entity.name = door_name
+                door_request.entity.type = Entity.MODEL
+                door_request.pose = Pose()
+                door_request.pose.position = Point(x=float(door_pos[0]), y=float(door_pos[1]), z=float(door_pos[2]))
+                door_request.pose.orientation = Quaternion(x=float(door_ori[0]), y=float(door_ori[1]), z=float(door_ori[2]), w=float(door_ori[3]))
+                self.set_pose_client.call_async(door_request)
+                
+                # Marker pose
+                marker_request = SetEntityPose.Request()
+                marker_request.entity = Entity()
+                marker_request.entity.name = marker_name
+                marker_request.entity.type = Entity.MODEL
+                marker_request.pose = Pose()
+                marker_request.pose.position = Point(x=float(marker_pos[0]), y=float(marker_pos[1]), z=float(marker_pos[2]))
+                marker_request.pose.orientation = Quaternion(x=float(marker_ori[0]), y=float(marker_ori[1]), z=float(marker_ori[2]), w=float(marker_ori[3]))
+                self.set_pose_client.call_async(marker_request)
+            except Exception as e:
+                self.node.get_logger().warn(f'Failed to set pose: {e}')
+
+    def open_door(self, duration=1.0):
+        """
+        Animate the door opening to fully open position.
+        
+        Parameters:
+            duration: Time in seconds for the animation
+        """
+        if not hasattr(self, '_door_marker_name') or not self._door_marker_name:
+            self.node.get_logger().warn('Door marker not spawned yet')
+            return
+        
+        if not hasattr(self, '_current_door_angle'):
+            self._current_door_angle = 0.0
+        
+        start_angle = self._current_door_angle
+        end_angle = -self.door_amplitude
+        self._animate_door_to_angle(start_angle, end_angle, duration)
+        self._current_door_angle = end_angle
+        self.node.get_logger().info('Door opened')
+
+    def close_door(self, duration=1.0):
+        """
+        Animate the door closing to closed position.
+        
+        Parameters:
+            duration: Time in seconds for the animation
+        """
+        if not hasattr(self, '_door_marker_name') or not self._door_marker_name:
+            self.node.get_logger().warn('Door marker not spawned yet')
+            return
+        
+        if not hasattr(self, '_current_door_angle'):
+            self._current_door_angle = -self.door_amplitude
+        
+        start_angle = self._current_door_angle
+        end_angle = 0.0
+        self._animate_door_to_angle(start_angle, end_angle, duration)
+        self._current_door_angle = end_angle
+        self.node.get_logger().info('Door closed')
+
+    def _animate_door_to_angle(self, start_angle, end_angle, duration, fps=50):
+        """
+        Animate the door from start_angle to end_angle over duration seconds.
+        
+        Parameters:
+            start_angle: Starting angle in radians
+            end_angle: Ending angle in radians
+            duration: Animation duration in seconds
+            fps: Frames per second for the animation
+        """
+        num_steps = int(duration * fps)
+        if num_steps < 1:
+            num_steps = 1
+        
+        for i in range(num_steps + 1):
+            t = i / num_steps
+            # Smooth easing (ease-in-out)
+            t_smooth = t * t * (3 - 2 * t)
+            angle = start_angle + (end_angle - start_angle) * t_smooth
+            self._set_door_angle("front", self._door_marker_name, angle)
+            time.sleep(1.0 / fps)
+
+    def start_door_flapping_animation(self, marker_name):
         """Start the door animation with attached marker."""
         if self.animation_thread and self.animation_thread.is_alive():
             self.node.get_logger().warn('Animation already running')
@@ -457,7 +625,7 @@ class Simulated3DPrinter:
         self.node.get_logger().info('Door animation stopped')
 
     def spawn(self):
-        """Spawn the complete printer with walls and initialize TF."""
+        """Spawn the printer walls and initialize TF."""
         # Broadcast printer frame and wait for TF
         for _ in range(10):
             self._broadcast_printer_frame()
@@ -467,6 +635,57 @@ class Simulated3DPrinter:
         self.spawn_all_walls()
         
         self.node.get_logger().info(f'Printer spawned at position {self.pos}')
+
+    def spawn_complete(self):
+        """
+        Spawn the complete printer setup with walls, markers, and door animation.
+        
+        This is the simplest way to use the printer - just call this method
+        and everything will be set up with default configurations.
+        """
+        # Setup pose service for animations
+        self._setup_pose_service()
+        
+        # Spawn walls
+        self.spawn()
+        
+        # Spawn static marker if configured
+        if self.static_marker_texture:
+            static_local_pos = [0, -self.depth/2 - self.wall_thickness - 0.02, 0]
+            self.spawn_aruco_marker(
+                self.static_marker_texture,
+                self.static_marker_size,
+                static_local_pos
+            )
+        
+        # Spawn door marker and store name for open/close functions
+        self._door_marker_name = self.spawn_door_marker(
+            self.door_marker_texture,
+            self.door_marker_size
+        )
+        
+        if self.enable_door_flapping_animation:
+            self.start_door_flapping_animation(self._door_marker_name)
+        
+        self.node.get_logger().info('Printer setup complete')
+
+    def spin(self):
+        """Convenience method to spin the node."""
+        try:
+            rclpy.spin(self.node)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.shutdown()
+
+    def shutdown(self):
+        """Clean shutdown of the printer and all resources."""
+        self.cleanup()
+        if self._bridge_proc:
+            self._bridge_proc.terminate()
+            self._bridge_proc.wait()
+        if self._owns_node:
+            self.node.destroy_node()
 
     def cleanup(self):
         """Remove all spawned entities."""
@@ -479,84 +698,31 @@ class Simulated3DPrinter:
 
 
 def main():
+    """Simple main function demonstrating the printer usage."""
     rclpy.init()
-    node = Node('simulated_printer')
     
-    # Start the ros_gz_bridge for the set_pose service
-    bridge_proc = subprocess.Popen(
-        ['ros2', 'run', 'ros_gz_bridge', 'parameter_bridge',
-         '/world/default/set_pose@ros_gz_interfaces/srv/SetEntityPose'],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-    node.get_logger().info('Started ros_gz_bridge for set_pose service')
+    # Simple usage - just create and spawn with defaults
+    printer = Simulated3DPrinter()
+    printer.spawn_complete()
     
-    # Create service client
-    set_pose_client = node.create_client(SetEntityPose, '/world/default/set_pose')
-    node.get_logger().info('Waiting for set_pose service...')
-    if set_pose_client.wait_for_service(timeout_sec=10.0):
-        node.get_logger().info('SetEntityPose service available')
-    else:
-        node.get_logger().warn('SetEntityPose service not available')
+    # Demonstrate opening and closing the door with animation
+    num_cycles = 3
+    pause_between = 0.5  # seconds to pause between open/close
+    animation_duration = 1.0  # seconds for each open/close animation
     
-    # ============================================================
-    # CONFIGURATION - Edit these values to customize the printer
-    # ============================================================
-    printer_config = {
-        'pos': [0.0, -0.7, 0.1],
-        'orient': [0.0, 0.0, 0.5],  # roll, pitch, yaw in radians
-        'width': 0.3,
-        'depth': 0.3,
-        'height': 0.3,
-        'wall_thickness': 0.01,
-        'door_frequency': 0.2,  # Hz
-        'door_amplitude': math.pi / 2,  # radians
-    }
+    for i in range(num_cycles):
+        printer.node.get_logger().info(f'Cycle {i + 1}/{num_cycles}')
+        
+        time.sleep(pause_between)
+        printer.open_door(duration=animation_duration)
+        
+        time.sleep(pause_between)
+        printer.close_door(duration=animation_duration)
     
-    door_marker_config = {
-        'texture_path': 'materials/textures/marker4x4_0.png',
-        'marker_size': 0.03,
-    }
+    printer.node.get_logger().info('Door demo complete, spinning...')
+    printer.spin()
     
-    # Optional: additional static marker
-    static_marker_config = {
-        'texture_path': 'materials/textures/marker6x6_0.png',
-        'marker_size': 0.05,
-        'local_pos': [0, -0.15 - 0.02, 0],  # Outside front wall
-    }
-    # ============================================================
-    
-    # Create and spawn the printer
-    printer = Simulated3DPrinter(node, **printer_config)
-    printer.setup_pose_service(set_pose_client)
-    printer.spawn()
-    
-    # Spawn optional static marker
-    if static_marker_config:
-        printer.spawn_aruco_marker(
-            static_marker_config['texture_path'],
-            static_marker_config['marker_size'],
-            static_marker_config['local_pos']
-        )
-    
-    # Spawn door marker and start animation
-    door_marker_name = printer.spawn_door_marker(
-        door_marker_config['texture_path'],
-        door_marker_config['marker_size']
-    )
-    printer.start_door_animation(door_marker_name)
-    
-    # Keep node alive
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        printer.cleanup()
-        bridge_proc.terminate()
-        bridge_proc.wait()
-        node.destroy_node()
-        rclpy.shutdown()
+    rclpy.shutdown()
 
 
 if __name__ == '__main__':
