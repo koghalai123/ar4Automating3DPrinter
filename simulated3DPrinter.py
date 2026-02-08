@@ -19,10 +19,7 @@ from ros_gz_interfaces.srv import SetEntityPose
 from ros_gz_interfaces.msg import Entity
 
 
-def rotate_vector_by_quaternion(v, q):
-    """Rotate a 3D vector by a quaternion."""
-    rot_matrix = tf_transformations.quaternion_matrix(q)[:3, :3]
-    return rot_matrix @ v
+
 
 
 class Simulated3DPrinter:
@@ -47,8 +44,10 @@ class Simulated3DPrinter:
         door_amplitude: Door swing amplitude in radians
         door_marker_texture: Texture path for door marker
         door_marker_size: Size of door marker
+        door_marker_local_pos: [x, y, z] offset from door front face center (y- is outward)
         static_marker_texture: Texture path for static marker (None to disable)
         static_marker_size: Size of static marker
+        static_marker_local_pos: [x, y, z] position in printer frame (None for default)
         enable_door_flapping_animation: Whether to animate the door
     """
     
@@ -59,18 +58,20 @@ class Simulated3DPrinter:
     def __init__(
         self,
         node=None,
-        pos=(0.0, -0.7, 0.1),
-        orient=(0.0, 0.0, 0.5),
-        width=0.3,
-        depth=0.3,
+        pos=(0.0, -0.63, 0.15)+np.random.uniform(-0.03, 0.03, size=3),
+        orient=(0.0, 0.0, np.pi),
+        width=0.2,
+        depth=0.2,
         height=0.3,
         wall_thickness=0.01,
         door_frequency=0.2,
         door_amplitude=math.pi / 2,
-        door_marker_texture='materials/textures/marker4x4_0.png',
-        door_marker_size=0.03,
-        static_marker_texture='materials/textures/marker6x6_0.png',
-        static_marker_size=0.05,
+        door_marker_texture='materials/textures/marker6x6_0.png',
+        door_marker_size=0.05,
+        door_marker_local_pos=[0,0,0.01],
+        static_marker_texture='materials/textures/marker4x4_0.png',
+        static_marker_size=0.03,
+        static_marker_local_pos=None,
         enable_door_flapping_animation=False,
         model_dir=None,
         aruco_sdf_path=None
@@ -93,8 +94,10 @@ class Simulated3DPrinter:
         # Marker configuration
         self.door_marker_texture = door_marker_texture
         self.door_marker_size = door_marker_size
+        self.door_marker_local_pos = door_marker_local_pos
         self.static_marker_texture = static_marker_texture
         self.static_marker_size = static_marker_size
+        self.static_marker_local_pos = static_marker_local_pos
         self.enable_door_flapping_animation = enable_door_flapping_animation
         
         # TF components
@@ -128,7 +131,16 @@ class Simulated3DPrinter:
         # Animation thread
         self.animation_thread = None
         self.running = False
+        
+        # Door entity names (set during spawn)
+        self._door_name = None
+        self._door_marker_name = None
 
+    def rotate_vector_by_quaternion(self, v, q):
+        """Rotate a 3D vector by a quaternion."""
+        rot_matrix = tf_transformations.quaternion_matrix(q)[:3, :3]
+        return rot_matrix @ v
+    
     def _setup_pose_service(self):
         """Initialize the ros_gz_bridge and service client."""
         self._bridge_proc = subprocess.Popen(
@@ -345,19 +357,374 @@ class Simulated3DPrinter:
         for name, size, local_pos in wall_configs:
             self.spawn_wall(name, size, local_pos)
 
-    def spawn_door_marker(self, texture_path, marker_size):
+    def _generate_wall_link_sdf(self, name, size, local_pos):
+        """Generate SDF for a wall link within a combined model."""
+        return f"""
+    <link name="{name}">
+      <pose>{local_pos[0]} {local_pos[1]} {local_pos[2]} 0 0 0</pose>
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>{size[0]} {size[1]} {size[2]}</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.5 0.5 0.5 1</ambient>
+          <diffuse>0.5 0.5 0.5 1</diffuse>
+        </material>
+      </visual>
+    </link>"""
+
+    def _generate_marker_link_sdf(self, name, texture_path, marker_size, local_pos, extra_yaw=0):
+        """Generate SDF for an ArUco marker link within a combined model."""
+        # Marker needs 90° yaw rotation to face correctly
+        yaw = math.pi/2 + extra_yaw
+        return f"""
+    <link name="{name}">
+      <pose>{local_pos[0]} {local_pos[1]} {local_pos[2]} 0 0 {yaw}</pose>
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>0.0001 {marker_size} {marker_size}</size>
+          </box>
+        </geometry>
+        <material>
+          <pbr>
+            <metal>
+              <albedo_map>{texture_path}</albedo_map>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+    </link>"""
+
+    def _generate_combined_sdf(self, model_name, include_door=True):
+        """
+        Generate a complete SDF with all walls and markers as visuals in a single link.
+        
+        Parameters:
+            model_name: Name for the combined model
+            include_door: Whether to include the front wall (door)
+        
+        Returns:
+            SDF content string
+        """
+        t = self.wall_thickness
+        w, d, h = self.width, self.depth, self.height
+        
+        # Wall configurations: (name, size, local_pos) - all in printer's local frame
+        wall_configs = [
+            ("bottom", [w, d, t], [0, 0, -h/2]),
+            ("top", [w, d, t], [0, 0, h/2]),
+            ("left", [t, d, h], [-w/2, 0, 0]),
+            ("right", [t, d, h], [w/2, 0, 0]),
+            ("back", [w, t, h], [0, d/2, 0]),
+        ]
+        if include_door:
+            wall_configs.append(("front", [w, t, h], [0, -d/2, 0]))
+        
+        # Build wall visuals
+        visuals = ""
+        for name, size, local_pos in wall_configs:
+            visuals += f"""
+      <visual name="{name}">
+        <pose>{local_pos[0]} {local_pos[1]} {local_pos[2]} 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>{size[0]} {size[1]} {size[2]}</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.5 0.5 0.5 1</ambient>
+          <diffuse>0.5 0.5 0.5 1</diffuse>
+        </material>
+      </visual>"""
+        
+        # Static marker if configured
+        if self.static_marker_texture:
+            static_local_pos = self.static_marker_local_pos
+            if static_local_pos is None:
+                static_local_pos = [0, -d/2 - t + 0.05, 0]
+            # Marker needs 90° yaw rotation
+            visuals += f"""
+      <visual name="static_marker">
+        <pose>{static_local_pos[0]} {static_local_pos[1]} {static_local_pos[2]} 0 0 {math.pi/2}</pose>
+        <geometry>
+          <box>
+            <size>0.0001 {self.static_marker_size} {self.static_marker_size}</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>{self.static_marker_texture}</albedo_map>
+              <metalness>0.0</metalness>
+              <roughness>1.0</roughness>
+            </metal>
+          </pbr>
+        </material>
+      </visual>"""
+        
+        # Door marker (attached to front wall if door is included)
+        if include_door and self.door_marker_texture:
+            door_relative_pos = self.door_marker_local_pos if self.door_marker_local_pos else [0, 0, 0]
+            marker_surface_offset = -0.005  # 5mm outside
+            door_front_face_local = [0, -d/2 - t/2 + marker_surface_offset, 0]
+            door_marker_pos = [
+                door_front_face_local[0] + door_relative_pos[0],
+                door_front_face_local[1] + door_relative_pos[1],
+                door_front_face_local[2] + door_relative_pos[2]
+            ]
+            visuals += f"""
+      <visual name="door_marker">
+        <pose>{door_marker_pos[0]} {door_marker_pos[1]} {door_marker_pos[2]} 0 0 {math.pi/2}</pose>
+        <geometry>
+          <box>
+            <size>0.0001 {self.door_marker_size} {self.door_marker_size}</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>{self.door_marker_texture}</albedo_map>
+              <metalness>0.0</metalness>
+              <roughness>1.0</roughness>
+            </metal>
+          </pbr>
+        </material>
+      </visual>"""
+        
+        sdf_content = f"""<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="{model_name}">
+    <static>true</static>
+    <link name="body">
+{visuals}
+    </link>
+  </model>
+</sdf>"""
+        return sdf_content
+
+    
+
+    def _generate_door_sdf(self, door_name):
+        """Generate SDF for the door (front wall) as a separate model."""
+        t = self.wall_thickness
+        w, h = self.width, self.height
+        
+        return f"""<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="{door_name}">
+    <static>false</static>
+    <link name="link">
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>{w} {t} {h}</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.5 0.5 0.5 1</ambient>
+          <diffuse>0.5 0.5 0.5 1</diffuse>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>"""
+
+    def _generate_door_marker_sdf(self, marker_name):
+        """Generate SDF for the door marker as a separate model."""
+        # Use relative path - the SDF file is written to model_dir so relative paths work
+        texture_path = self.door_marker_texture
+        
+        return f"""<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="{marker_name}">
+    <static>false</static>
+    <link name="link">
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>0.0001 {self.door_marker_size} {self.door_marker_size}</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>{texture_path}</albedo_map>
+              <metalness>0.0</metalness>
+              <roughness>1.0</roughness>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>"""
+
+    def spawn_fast(self, body_name="printer_body"):
+        """
+        Fast spawn: static parts as one model, door + marker separate for animation.
+        
+        This reduces spawn commands from 8+ to just 3, while still allowing door animation.
+        Use this instead of spawn_complete() for faster, more reliable spawning.
+        
+        Parameters:
+            body_name: Name for the static body model
+        """
+        # Setup pose service for animations
+        self._setup_pose_service()
+        
+        # Broadcast printer frame and ensure TF is ready
+        for _ in range(10):
+            self._broadcast_printer_frame()
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+        
+        # Delete existing entities (both from spawn_fast and spawn_complete)
+        self._delete_entity(body_name)
+        self._delete_entity("door")
+        for wall_name in ["bottom", "top", "left", "right", "front", "back"]:
+            self._delete_entity(wall_name)
+        
+        # 1. Spawn static body (5 walls + static marker) as single model
+        # Link positions are in model's local frame, spawn at printer's world position
+        sdf_content = self._generate_combined_sdf(body_name, include_door=False)
+        
+        with tempfile.NamedTemporaryFile(dir=self.model_dir, mode='w', suffix='.sdf', delete=False) as f:
+            f.write(sdf_content)
+            body_sdf_path = f.name
+        
+        # Spawn at printer's world position and orientation
+        x, y, z = float(self.pos[0]), float(self.pos[1]), float(self.pos[2])
+        roll, pitch, yaw = float(self.orient[0]), float(self.orient[1]), float(self.orient[2])
+        
+        cmd = [
+            'ros2', 'run', 'ros_gz_sim', 'create',
+            '-file', body_sdf_path, '-name', body_name,
+            '-x', str(x), '-y', str(y), '-z', str(z),
+            '-R', str(roll), '-P', str(pitch), '-Y', str(yaw)
+        ]
+        
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            self.node.get_logger().info(f'Spawned printer body: {body_name}')
+            self.spawned_entities.append(body_name)
+        except subprocess.CalledProcessError as e:
+            self.node.get_logger().error(f'Failed to spawn body: {e.stderr or e.stdout}')
+        finally:
+            os.unlink(body_sdf_path)
+        
+        # 2. Spawn door as separate model (for animation)
+        roll, pitch, yaw = float(self.orient[0]), float(self.orient[1]), float(self.orient[2])
+        
+        door_sdf = self._generate_door_sdf("door")
+        with tempfile.NamedTemporaryFile(dir=self.model_dir, mode='w', suffix='.sdf', delete=False) as f:
+            f.write(door_sdf)
+            door_sdf_path = f.name
+        
+        # Door initial position (at front, centered)
+        door_local = [0, -self.depth/2, 0]
+        door_x, door_y, door_z = self._transform_point_to_world(*door_local)
+        
+        cmd = [
+            'ros2', 'run', 'ros_gz_sim', 'create',
+            '-file', door_sdf_path, '-name', 'door',
+            '-x', str(door_x), '-y', str(door_y), '-z', str(door_z),
+            '-R', str(roll), '-P', str(pitch), '-Y', str(yaw)
+        ]
+        
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            self.node.get_logger().info('Spawned door')
+            self.spawned_entities.append('door')
+            self._door_name = 'door'  # Store door name for animation
+        except subprocess.CalledProcessError as e:
+            self.node.get_logger().error(f'Failed to spawn door: {e.stderr or e.stdout}')
+        finally:
+            os.unlink(door_sdf_path)
+        
+        # 3. Spawn door marker as separate model (for animation)
+        marker_name = os.path.basename(self.door_marker_texture).split('.')[0]
+        self._delete_entity(marker_name)
+        
+        marker_sdf = self._generate_door_marker_sdf(marker_name)
+        with tempfile.NamedTemporaryFile(dir=self.model_dir, mode='w', suffix='.sdf', delete=False) as f:
+            f.write(marker_sdf)
+            marker_sdf_path = f.name
+        
+        # Marker initial position
+        door_relative_pos = self.door_marker_local_pos if self.door_marker_local_pos else [0, 0, 0]
+        marker_surface_offset = -0.005
+        door_front_face_local = [0, -self.depth/2 - self.wall_thickness/2 + marker_surface_offset, 0]
+        marker_local = [
+            door_front_face_local[0] + door_relative_pos[0],
+            door_front_face_local[1] + door_relative_pos[1],
+            door_front_face_local[2] + door_relative_pos[2]
+        ]
+        marker_x, marker_y, marker_z = self._transform_point_to_world(*marker_local)
+        marker_yaw = yaw + math.pi/2
+        
+        cmd = [
+            'ros2', 'run', 'ros_gz_sim', 'create',
+            '-file', marker_sdf_path, '-name', marker_name,
+            '-x', str(marker_x), '-y', str(marker_y), '-z', str(marker_z),
+            '-R', str(roll), '-P', str(pitch), '-Y', str(marker_yaw)
+        ]
+        
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            self.node.get_logger().info(f'Spawned door marker: {marker_name}')
+            self.spawned_entities.append(marker_name)
+        except subprocess.CalledProcessError as e:
+            self.node.get_logger().error(f'Failed to spawn marker: {e.stderr or e.stdout}')
+        finally:
+            os.unlink(marker_sdf_path)
+        
+        # Store door marker name for animation
+        self._door_marker_name = marker_name
+        
+        # Start animation if enabled
+        if self.enable_door_flapping_animation:
+            self.start_door_flapping_animation(marker_name)
+        
+        self.node.get_logger().info('Fast printer spawn complete (3 models)')
+        return body_name, 'door', marker_name
+
+    def spawn_door_marker(self, texture_path, marker_size, door_relative_pos=None):
         """
         Spawn a marker attached to the front door.
         
         Parameters:
             texture_path: Path to the marker texture
             marker_size: Size of the marker
+            door_relative_pos: [x, y, z] offset from door front face center (y- is outward)
         
         Returns:
             Marker name
         """
-        # Position at center of front face, slightly outside
-        local_pos = [0, -self.depth/2 - self.wall_thickness/2, 0]
+        # Default position: at door front face center
+        if door_relative_pos is None:
+            door_relative_pos = [0, 0, 0]
+        
+        # Convert door front face position to printer frame for initial spawn
+        # Door front face in printer frame (when closed): [0, -depth/2 - wall_thickness/2, 0]
+        # Add offset to place marker outside the door surface
+        marker_surface_offset = -0.005  # 5mm outside the door
+        door_front_face_local = [0, -self.depth/2 - self.wall_thickness/2 + marker_surface_offset, 0]
+        local_pos = [
+            door_front_face_local[0] + door_relative_pos[0],
+            door_front_face_local[1] + door_relative_pos[1],
+            door_front_face_local[2] + door_relative_pos[2]
+        ]
         return self.spawn_aruco_marker(texture_path, marker_size, local_pos, "door_marker")
 
     def _animate_door(self, door_name, marker_name, local_marker_pos):
@@ -394,13 +761,13 @@ class Simulated3DPrinter:
             ])
             
             # Door position and orientation in world
-            door_pos = np.array(hinge_world) + rotate_vector_by_quaternion(rotated_offset, self.q)
+            door_pos = np.array(hinge_world) + self.rotate_vector_by_quaternion(rotated_offset, self.q)
             q_delta = tf_transformations.quaternion_from_euler(0, 0, delta_yaw)
             door_ori = tf_transformations.quaternion_multiply(self.q, q_delta)
             door_ori = [float(x) for x in door_ori]
             
             # Marker position and orientation (with extra 90° rotation)
-            marker_pos = door_pos + rotate_vector_by_quaternion(local_marker_pos, door_ori)
+            marker_pos = door_pos + self.rotate_vector_by_quaternion(local_marker_pos, door_ori)
             q_marker_offset = tf_transformations.quaternion_from_euler(0, 0, math.pi/2)
             marker_ori = tf_transformations.quaternion_multiply(door_ori, q_marker_offset)
             marker_ori = [float(x) for x in marker_ori]
@@ -482,7 +849,12 @@ class Simulated3DPrinter:
     def _set_door_angle(self, door_name, marker_name, angle):
         """Set the door to a specific angle (0 = closed, -amplitude = fully open)."""
         offset_to_center = np.array([self.width/2, 0, 0])
-        local_marker_pos = np.array([0, -self.wall_thickness/2, 0])
+        
+        # Marker offset from door center: front face offset + surface offset + user-specified offset
+        # Front face is at y = -wall_thickness/2 from door center, plus 5mm outside
+        marker_surface_offset = -0.005  # 5mm outside the door
+        user_offset = np.array(self.door_marker_local_pos) if self.door_marker_local_pos is not None else np.array([0, 0, 0])
+        local_marker_pos = np.array([0, -self.wall_thickness/2 + marker_surface_offset, 0]) + user_offset
         
         # Compute hinge position in world
         hinge_local = [-self.width/2, -self.depth/2, 0]
@@ -497,13 +869,13 @@ class Simulated3DPrinter:
         ])
         
         # Door position and orientation in world
-        door_pos = np.array(hinge_world) + rotate_vector_by_quaternion(rotated_offset, self.q)
+        door_pos = np.array(hinge_world) + self.rotate_vector_by_quaternion(rotated_offset, self.q)
         q_delta = tf_transformations.quaternion_from_euler(0, 0, angle)
         door_ori = tf_transformations.quaternion_multiply(self.q, q_delta)
         door_ori = [float(x) for x in door_ori]
         
         # Marker position and orientation (with extra 90° rotation)
-        marker_pos = door_pos + rotate_vector_by_quaternion(local_marker_pos, door_ori)
+        marker_pos = door_pos + self.rotate_vector_by_quaternion(local_marker_pos, door_ori)
         q_marker_offset = tf_transformations.quaternion_from_euler(0, 0, math.pi/2)
         marker_ori = tf_transformations.quaternion_multiply(door_ori, q_marker_offset)
         marker_ori = [float(x) for x in marker_ori]
@@ -587,12 +959,15 @@ class Simulated3DPrinter:
         if num_steps < 1:
             num_steps = 1
         
+        # Use stored door name, default to "front" for spawn_complete() compatibility
+        door_name = self._door_name if self._door_name else "front"
+        
         for i in range(num_steps + 1):
             t = i / num_steps
             # Smooth easing (ease-in-out)
             t_smooth = t * t * (3 - 2 * t)
             angle = start_angle + (end_angle - start_angle) * t_smooth
-            self._set_door_angle("front", self._door_marker_name, angle)
+            self._set_door_angle(door_name, self._door_marker_name, angle)
             time.sleep(1.0 / fps)
 
     def start_door_flapping_animation(self, marker_name):
@@ -605,13 +980,19 @@ class Simulated3DPrinter:
         self.door_pose_pub = self.node.create_publisher(PoseStamped, '/door_world_pose', 10)
         self.marker_pose_pub = self.node.create_publisher(PoseStamped, '/marker_world_pose', 10)
         
-        # Local marker position relative to door center
-        local_marker_pos = np.array([0, -self.wall_thickness/2, 0])
+        # Marker offset from door center: front face offset + surface offset + user-specified offset
+        # Front face is at y = -wall_thickness/2 from door center, plus 5mm outside
+        marker_surface_offset = -0.005  # 5mm outside the door
+        user_offset = np.array(self.door_marker_local_pos) if self.door_marker_local_pos is not None else np.array([0, 0, 0])
+        local_marker_pos = np.array([0, -self.wall_thickness/2 + marker_surface_offset, 0]) + user_offset
+        
+        # Use stored door name, default to "front" for spawn_complete() compatibility
+        door_name = self._door_name if self._door_name else "front"
         
         self.running = True
         self.animation_thread = threading.Thread(
             target=self._animate_door,
-            args=("front", marker_name, local_marker_pos),
+            args=(door_name, marker_name, local_marker_pos),
             daemon=True
         )
         self.animation_thread.start()
@@ -651,17 +1032,23 @@ class Simulated3DPrinter:
         
         # Spawn static marker if configured
         if self.static_marker_texture:
-            static_local_pos = [0, -self.depth/2 - self.wall_thickness - 0.02, 0]
+            static_local_pos = self.static_marker_local_pos
+            if static_local_pos is None:
+                static_local_pos = [0, -self.depth/2 - self.wall_thickness + 0.05, 0]
             self.spawn_aruco_marker(
                 self.static_marker_texture,
                 self.static_marker_size,
                 static_local_pos
             )
         
+        # Store door name for animation (spawn_complete uses "front" wall as door)
+        self._door_name = "front"
+        
         # Spawn door marker and store name for open/close functions
         self._door_marker_name = self.spawn_door_marker(
             self.door_marker_texture,
-            self.door_marker_size
+            self.door_marker_size,
+            self.door_marker_local_pos
         )
         
         if self.enable_door_flapping_animation:
@@ -703,13 +1090,13 @@ def main():
     
     # Simple usage - just create and spawn with defaults
     printer = Simulated3DPrinter()
-    printer.spawn_complete()
+    printer.spawn_fast()
     
     # Demonstrate opening and closing the door with animation
     num_cycles = 3
     pause_between = 0.5  # seconds to pause between open/close
     animation_duration = 1.0  # seconds for each open/close animation
-    
+    #time.sleep(3)
     for i in range(num_cycles):
         printer.node.get_logger().info(f'Cycle {i + 1}/{num_cycles}')
         
