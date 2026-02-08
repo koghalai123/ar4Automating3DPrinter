@@ -357,47 +357,6 @@ class Simulated3DPrinter:
         for name, size, local_pos in wall_configs:
             self.spawn_wall(name, size, local_pos)
 
-    def _generate_wall_link_sdf(self, name, size, local_pos):
-        """Generate SDF for a wall link within a combined model."""
-        return f"""
-    <link name="{name}">
-      <pose>{local_pos[0]} {local_pos[1]} {local_pos[2]} 0 0 0</pose>
-      <visual name="visual">
-        <geometry>
-          <box>
-            <size>{size[0]} {size[1]} {size[2]}</size>
-          </box>
-        </geometry>
-        <material>
-          <ambient>0.5 0.5 0.5 1</ambient>
-          <diffuse>0.5 0.5 0.5 1</diffuse>
-        </material>
-      </visual>
-    </link>"""
-
-    def _generate_marker_link_sdf(self, name, texture_path, marker_size, local_pos, extra_yaw=0):
-        """Generate SDF for an ArUco marker link within a combined model."""
-        # Marker needs 90° yaw rotation to face correctly
-        yaw = math.pi/2 + extra_yaw
-        return f"""
-    <link name="{name}">
-      <pose>{local_pos[0]} {local_pos[1]} {local_pos[2]} 0 0 {yaw}</pose>
-      <visual name="visual">
-        <geometry>
-          <box>
-            <size>0.0001 {marker_size} {marker_size}</size>
-          </box>
-        </geometry>
-        <material>
-          <pbr>
-            <metal>
-              <albedo_map>{texture_path}</albedo_map>
-            </metal>
-          </pbr>
-        </material>
-      </visual>
-    </link>"""
-
     def _generate_combined_sdf(self, model_name, include_door=True):
         """
         Generate a complete SDF with all walls and markers as visuals in a single link.
