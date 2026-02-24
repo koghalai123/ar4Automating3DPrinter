@@ -1,1 +1,0 @@
- ~/ar4_ws/src/ar4Automating3DPrinter/spawn_colorful_objects.sh
