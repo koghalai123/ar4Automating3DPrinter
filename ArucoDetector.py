@@ -25,6 +25,10 @@ class ArucoDetectionViewer(PoseReader):
         self.markerNamePrefix = "aruco_marker_"
         self.filterStates = np.zeros((100, 6))
 
+        # Default dt in case joint_states hasn't arrived yet
+        if not hasattr(self, 'dt') or self.dt is None:
+            self.dt = 1.0 / self.fps
+
         # Single object handles web server + aruco detection + frame compositing.
         # We pass source="none" so it doesn't create its own ROS node or webcam —
         # this class owns the ROS subscriptions and feeds frames manually.
@@ -76,6 +80,10 @@ class ArucoDetectionViewer(PoseReader):
                 R.from_quat(tf2_quat).as_euler("XYZ", degrees=False))
 
     def cameraToBase(self, posInFrame, eulerInFrame, markerID=0):
+        # Guard: if dt is not yet set by PoseReader, use default
+        if not hasattr(self, 'dt') or self.dt is None or self.dt == 0:
+            self.dt = 1.0 / self.fps
+
         try:
             badPos, badEuler = self.applyFrameChange(posInFrame, eulerInFrame,
                                                      source_frame="base_link", target_frame="ee_camera_link")
@@ -114,10 +122,15 @@ class ArucoDetectionViewer(PoseReader):
 
 def main(args=None):
     rclpy.init(args=args)
-    
-
-    printer = Simulated3DPrinter([0, 0, 0], [0, 0, 0])
     node = ArucoDetectionViewer()
+
+    printer = Simulated3DPrinter(
+        node=node,
+        pos=[0.0, -0.67, 0.38],
+        orient=[0.0, 0.0, np.pi],
+    )
+    printer.spawn_fast()
+    
     
 
     node.move_to_pose(np.array([0.4,0.0,0.4]), np.array([0.0,0.0,0.0]))
