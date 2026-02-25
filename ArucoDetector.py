@@ -119,6 +119,10 @@ class ArucoDetectionViewer(PoseReader):
         t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = float(q[0]), float(q[1]), float(q[2]), float(q[3])
         self.tf2_broadcaster.sendTransform(t)
 
+    @property
+    def marker_poses(self):
+        return self.stream.marker_poses
+
 
 def main(args=None):
     rclpy.init(args=args)

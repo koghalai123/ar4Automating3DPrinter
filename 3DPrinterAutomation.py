@@ -144,6 +144,7 @@ class printerAutomation(ArucoDetectionViewer):
     
 
     def moveToMarker(self, markerID=0):
+        print(f"Moving to marker ID {markerID}...")
         offsetPos = np.array([0.0, 0.0, 0.15])  #position offset from marker
         offsetOri = np.array([0.0, 0.0, 0.0])  # No rotation offset
         if hasattr(self, 'marker_poses') and self.marker_poses is not None:
@@ -159,8 +160,12 @@ class printerAutomation(ArucoDetectionViewer):
 
 
                     self.get_logger().info(f'Moving to marker ID {markerID} at pose: {marker_pos}, {marker_ori}')
+                    print(f"Computed target pose: pos={goodPos}, orient={goodEuler}")
                     self.move_to_pose(goodPos, goodEuler)
                     return
+        else:
+            self.get_logger().warn("No marker poses available to move to marker.")
+            
     def liftPlate(self, markerID=0):
         offsetPos = np.array([0.0, 0.1, 0.15])  #position offset from marker
         offsetOri = np.array([0.0, 0.0, 0.0])  # No rotation offset
@@ -412,14 +417,14 @@ def main():
     # Run the initial scan (blocks until move_to_pose completes)
     node.get_logger().info("Starting initial scan for markers...")
     node.scanLocationForMarkers(
-        estimated_pos=[0.0, -0.67, 0.35],
+        estimated_pos=[0.67, 0.0, 0.24],
         estimated_orient=[0, 0, 0],  # marker Z-axis points +Y (toward robot)
-        viewing_distance=0.25
+        viewing_distance=0.30
     )
     node.get_logger().info("Initial scan complete.")
 
     # Now start the interactive input loop on the main thread
-    #_input_thread(node)
+    _input_thread(node)
 
 
 
