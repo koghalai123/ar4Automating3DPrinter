@@ -18,7 +18,13 @@ from simulated3DPrinter import Simulated3DPrinter
 
 class ArucoDetectionViewer(PoseReader):
 
-    def __init__(self):
+    def __init__(self,
+                 source="ros",
+                 camera_index=None,
+                 camera_keyword="GENERAL WEBCAM",
+                 color_topic="/rgbd_camera/image",
+                 depth_topic="/rgbd_camera/depth_image",
+                 camera_info_topic="/rgbd_camera/camera_info"):
         super().__init__('aruco_detection_viewer', enable_pose_print=False)
 
         self.fps = 30.0
@@ -30,10 +36,9 @@ class ArucoDetectionViewer(PoseReader):
             self.dt = 1.0 / self.fps
 
         # Single object handles web server + aruco detection + frame compositing.
-        # We pass source="none" so it doesn't create its own ROS node or webcam —
-        # this class owns the ROS subscriptions and feeds frames manually.
+        # Pass through source / camera options so caller can choose "ros" or "webcam"
         self.stream = WebVideoStream(
-            source="ros",
+            source=source,
             port=5000,
             fps=self.fps,
             display_scale=2.0,
@@ -42,13 +47,20 @@ class ArucoDetectionViewer(PoseReader):
             dict_names=['DICT_4X4_50', 'DICT_6X6_50'],
             enrich_fn=self._enrich_marker_pose,
             log_fn=lambda msg: self.get_logger().info(msg),
-            color_topic="/rgbd_camera/image",
-            depth_topic="/rgbd_camera/depth_image",
-            camera_info_topic="/rgbd_camera/camera_info",
+            camera_index=camera_index,
+            camera_keyword=camera_keyword,
+            color_topic=color_topic,
+            depth_topic=depth_topic,
+            camera_info_topic=camera_info_topic,
         )
 
         self.tf2_buffer = tf2_ros.Buffer()
         self.tf2_listener = tf2_ros.TransformListener(self.tf2_buffer, self)
+
+        # Togglable 1-second timer for printing marker_poses
+        self._marker_print_timer = self.create_timer(1.0, self._print_marker_poses)
+        self._marker_print_enabled = False
+        self._marker_print_timer.cancel()
 
     # ---- Marker enrichment ----
 
@@ -91,7 +103,7 @@ class ArucoDetectionViewer(PoseReader):
             return None, None
 
         # Low-pass filter
-        fCutoff = 1.0
+        fCutoff = 3.0
         RC = 1 / (2 * np.pi * fCutoff)
         alpha = self.dt / (RC + self.dt)
         prev = self.filterStates[markerID, :]
@@ -119,15 +131,67 @@ class ArucoDetectionViewer(PoseReader):
         t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = float(q[0]), float(q[1]), float(q[2]), float(q[3])
         self.tf2_broadcaster.sendTransform(t)
 
+    # ---- Marker pose printing ----
+
+    def enable_marker_print(self):
+        """Start printing marker_poses to console every second."""
+        if not self._marker_print_enabled:
+            self._marker_print_enabled = True
+            self._marker_print_timer.reset()
+            self.get_logger().info('Marker pose printing enabled')
+
+    def disable_marker_print(self):
+        """Stop printing marker_poses to console."""
+        if self._marker_print_enabled:
+            self._marker_print_enabled = False
+            self._marker_print_timer.cancel()
+            self.get_logger().info('Marker pose printing disabled')
+
+    def toggle_marker_print(self):
+        """Toggle marker_poses console printing on/off."""
+        if self._marker_print_enabled:
+            self.disable_marker_print()
+        else:
+            self.enable_marker_print()
+
+    def _print_marker_poses(self):
+        poses = self.marker_poses
+        if not poses:
+            self.get_logger().info('[marker_poses] No markers seen yet')
+            return
+        for m in poses:
+            gp = m.get('global_pose')
+            if gp:
+                pos = gp['position']
+                ori = gp['orientation']
+                self.get_logger().info(
+                    f"[marker_poses] ID:{m['id']}  dict:{m['dict_name']}  "
+                    f"pos=({pos[0]:+.3f}, {pos[1]:+.3f}, {pos[2]:+.3f})  "
+                    f"rpy=({ori['roll']:+.1f}, {ori['pitch']:+.1f}, {ori['yaw']:+.1f})")
+            else:
+                self.get_logger().info(
+                    f"[marker_poses] ID:{m['id']}  dict:{m['dict_name']}  global_pose: N/A")
+
     @property
     def marker_poses(self):
-        return self.stream.marker_poses
+        """Persistent list of all markers ever detected, with id, dict size, and global pose."""
+        result = []
+        for entry in self.stream.marker_poses:
+            item = dict(entry)
+            item['dict_name'] = entry.get('dict_name', 'unknown')
+            if 'positionInWorld' in entry and 'orientInWorld' in entry:
+                item['global_pose'] = {
+                    'position': entry['positionInWorld'],
+                    'orientation': entry['orientInWorld'],
+                }
+            result.append(item)
+        return result
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = ArucoDetectionViewer()
-
+    node.enable_marker_print()
     printer = Simulated3DPrinter(
         node=node,
         pos=[0.0, -0.67, 0.38],

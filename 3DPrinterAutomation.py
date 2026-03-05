@@ -15,15 +15,27 @@ import threading
 
 
 class printerAutomation(ArucoDetectionViewer):
-    def __init__(self, calibration_mode=False):
-        super().__init__()
+    def __init__(self, calibration_mode=False, stream_source="webcam", camera_index=None, camera_keyword="GENERAL WEBCAM",
+                 color_topic="/rgbd_camera/image", depth_topic="/rgbd_camera/depth_image", camera_info_topic="/rgbd_camera/camera_info"):
+        super().__init__(source=stream_source,
+                         camera_index=camera_index,
+                         camera_keyword=camera_keyword,
+                         color_topic=color_topic,
+                         depth_topic=depth_topic,
+                         camera_info_topic=camera_info_topic)
         self.get_logger().info(f"printerAutomation initialized, calibration_mode={calibration_mode}")
 
         # Estimated marker frame name prefix
         self.estimatedMarkerPrefix = "estimated_marker_"
-        
+
         if not hasattr(self, 'tf2_broadcaster'):
             self.tf2_broadcaster = tf2_ros.TransformBroadcaster(self)
+
+        self.markerToHandleOffset = np.array([0.0, 0.08, 0.05])
+        self.markerToPickupOffset = np.array([0.0, 0.18, 0.05])
+
+    # NO detected_markers property needed — use self.marker_poses inherited
+    # from ArucoDetectionViewer which reads self.stream.found_markers
 
     def scanLocationForMarkers(self, estimated_pos, estimated_orient=[0,0,0], viewing_distance=0.15, frame_name=None):
         """
@@ -129,62 +141,92 @@ class printerAutomation(ArucoDetectionViewer):
             )
             
             if success:
-                # Pause to allow marker detection
                 time.sleep(pause_duration)
-                
-                # Check if any markers were detected
-                if hasattr(self, 'marker_poses') and self.marker_poses:
-                    self.get_logger().info(f"Detected {len(self.marker_poses)} markers at location {i+1}")
+
+                markers = self.marker_poses  # <-- reads from stream.found_markers
+                if markers:
+                    self.get_logger().info(f"Detected {len(markers)} markers at location {i+1}")
                 else:
                     self.get_logger().info(f"No markers detected at location {i+1}")
 
     def pickupPlate(self, markerID=0):
         self.moveToMarker(markerID)
         self.liftPlate(markerID)
-    
 
     def moveToMarker(self, markerID=0):
+        foundMarker = 0
         print(f"Moving to marker ID {markerID}...")
-        offsetPos = np.array([0.0, 0.0, 0.15])  #position offset from marker
-        offsetOri = np.array([0.0, 0.0, 0.0])  # No rotation offset
-        if hasattr(self, 'marker_poses') and self.marker_poses is not None:
-            for entry in self.marker_poses:
+        offsetPos = self.markerToHandleOffset
+        offsetOri = np.array([0.0, 0.0, 0.0])
+        markers = self.marker_poses
+        if markers:
+            for entry in markers:
                 if entry['id'] == markerID:
                     marker_pos = entry['positionInWorld']
                     temp = entry['orientInWorld']
                     marker_ori = np.array([temp['roll'], temp['pitch'], temp['yaw']])
                     tf2Name = entry['tf2Name']
 
-                    badPos, badEuler = self.applyFrameChange(offsetPos, offsetOri, source_frame = "base_link", target_frame = tf2Name)
-                    goodPos, goodEuler = self.to_good_frame(badPos,badEuler)
-
+                    # Re-broadcast marker TF and poll until the frame is available
+                    bad_pos, bad_euler = self.to_bad_frame(marker_pos, np.radians(marker_ori))
+                    badPos, badEuler = None, None
+                    for attempt in range(20):
+                        self.broadcast_marker_transform(bad_pos, bad_euler, child_frame=tf2Name)
+                        time.sleep(0.05)
+                        try:
+                            badPos, badEuler = self.applyFrameChange(offsetPos, offsetOri, source_frame="base_link", target_frame=tf2Name)
+                            break
+                        except Exception as e:
+                            self.get_logger().warn(f"TF lookup attempt {attempt+1}/20 for '{tf2Name}' failed: {e}")
+                    if badPos is None:
+                        self.get_logger().error(f"Could not resolve TF frame '{tf2Name}' after 20 attempts")
+                        return
+                    goodPos, goodEuler = self.to_good_frame(badPos, badEuler)
 
                     self.get_logger().info(f'Moving to marker ID {markerID} at pose: {marker_pos}, {marker_ori}')
                     print(f"Computed target pose: pos={goodPos}, orient={goodEuler}")
                     self.move_to_pose(goodPos, goodEuler)
+                    foundMarker = 1
                     return
+
+            if not foundMarker:
+                self.get_logger().warn(f"Marker ID {markerID} not found in detected marker poses.")
+                available_ids = [entry['id'] for entry in markers]
+                self.get_logger().info(f"Available marker IDs: {available_ids}")
         else:
             self.get_logger().warn("No marker poses available to move to marker.")
-            
+
     def liftPlate(self, markerID=0):
-        offsetPos = np.array([0.0, 0.1, 0.15])  #position offset from marker
-        offsetOri = np.array([0.0, 0.0, 0.0])  # No rotation offset
-        if hasattr(self, 'marker_poses') and self.marker_poses is not None:
-            for entry in self.marker_poses:
+        offsetPos = self.markerToPickupOffset
+        offsetOri = np.array([0.0, 0.0, 0.0])
+        markers = self.marker_poses
+        if markers:
+            for entry in markers:
                 if entry['id'] == markerID:
                     marker_pos = entry['positionInWorld']
                     temp = entry['orientInWorld']
                     marker_ori = np.array([temp['roll'], temp['pitch'], temp['yaw']])
                     tf2Name = entry['tf2Name']
 
-                    badPos, badEuler = self.applyFrameChange(offsetPos, offsetOri, source_frame = "base_link", target_frame = tf2Name)
-                    goodPos, goodEuler = self.to_good_frame(badPos,badEuler)
-
+                    # Re-broadcast marker TF and poll until the frame is available
+                    bad_pos, bad_euler = self.to_bad_frame(marker_pos, np.radians(marker_ori))
+                    badPos, badEuler = None, None
+                    for attempt in range(20):
+                        self.broadcast_marker_transform(bad_pos, bad_euler, child_frame=tf2Name)
+                        time.sleep(0.05)
+                        try:
+                            badPos, badEuler = self.applyFrameChange(offsetPos, offsetOri, source_frame="base_link", target_frame=tf2Name)
+                            break
+                        except Exception as e:
+                            self.get_logger().warn(f"TF lookup attempt {attempt+1}/20 for '{tf2Name}' failed: {e}")
+                    if badPos is None:
+                        self.get_logger().error(f"Could not resolve TF frame '{tf2Name}' after 20 attempts")
+                        return
+                    goodPos, goodEuler = self.to_good_frame(badPos, badEuler)
 
                     self.get_logger().info(f'Moving to marker ID {markerID} at pose: {marker_pos}, {marker_ori}')
                     self.move_to_pose(goodPos, goodEuler)
                     return
-
 
     def add_movement_constraint(self, constraint_type, value):
         """
@@ -242,14 +284,13 @@ def _print_menu():
     print("  3D Printer Automation - Command Menu")
     print("=" * 50)
     print("  1) Scan location for markers")
-    print("  2) Scan multiple locations")
-    print("  3) Move to marker")
-    print("  4) Lift plate")
-    print("  5) Pickup plate (move + lift)")
-    print("  6) Move to pose (manual)")
-    print("  7) List detected markers")
-    print("  8) Add movement constraint")
-    print("  9) Print current end-effector pose")
+    print("  2) Move to marker")
+    print("  3) Pickup plate (move + lift)")
+    print("  4) Move to pose (manual)")
+    print("  5) List detected markers")
+    print("  6) Add movement constraint")
+    print("  7) Print current end-effector pose")
+    print("  8) Set marker offsets")
     print("  0) Quit")
     print("=" * 50)
 
@@ -301,43 +342,18 @@ def _input_thread(node):
             )
 
         elif choice == "2":
-            n = _parse_floats("  How many locations? ", 1)
-            if n is None:
-                continue
-            n = int(n[0])
-            locations = []
-            for i in range(n):
-                pos = _parse_floats(f"  Location {i+1} pos (x y z): ", 3)
-                if pos is None:
-                    break
-                locations.append(pos)
-            if len(locations) == n:
-                dist = _parse_floats("  Viewing distance [0.15]: ", 1)
-                dist = dist[0] if dist else 0.15
-                pause = _parse_floats("  Pause duration (s) [2.0]: ", 1)
-                pause = pause[0] if pause else 2.0
-                node.get_logger().info(f"User requested scanMultipleLocations ({n} locations)")
-                node.scanMultipleLocations(locations, viewing_distance=dist, pause_duration=pause)
-
-        elif choice == "3":
             mid = _parse_floats("  Marker ID [0]: ", 1)
             mid = int(mid[0]) if mid else 0
             node.get_logger().info(f"User requested moveToMarker({mid})")
             node.moveToMarker(markerID=mid)
 
-        elif choice == "4":
-            mid = _parse_floats("  Marker ID [0]: ", 1)
-            mid = int(mid[0]) if mid else 0
-            node.get_logger().info(f"User requested liftPlate({mid})")
-            node.liftPlate(markerID=mid)
-
-        elif choice == "5":
+        elif choice == "3":
             mid = _parse_floats("  Marker ID [0]: ", 1)
             mid = int(mid[0]) if mid else 0
             node.get_logger().info(f"User requested pickupPlate({mid})")
             node.pickupPlate(markerID=mid)
 
-        elif choice == "6":
+        elif choice == "4":
             pos = _parse_floats("  Enter target pos (x y z): ", 3)
             if pos is None:
                 continue
@@ -347,17 +363,18 @@ def _input_thread(node):
             node.get_logger().info(f"User requested move_to_pose({pos}, {orient})")
             node.move_to_pose(np.array(pos), np.array(orient))
 
-        elif choice == "7":
-            if hasattr(node, 'marker_poses') and node.marker_poses:
-                print(f"\n  Detected {len(node.marker_poses)} marker(s):")
-                for entry in node.marker_poses:
+        elif choice == "5":
+            markers = node.marker_poses  # <-- reads from stream.found_markers
+            if markers:
+                print(f"\n  Found {len(markers)} marker(s):")
+                for entry in markers:
                     pos = entry.get('positionInWorld', 'N/A')
                     ori = entry.get('orientInWorld', 'N/A')
                     print(f"    ID {entry['id']}: pos={pos}, orient={ori}")
             else:
-                print("  No markers currently detected.")
+                print("  No markers found yet.")
 
-        elif choice == "8":
+        elif choice == "6":
             ctype = input("  Constraint type (orientation / x / y / z): ").strip()
             if ctype == "orientation":
                 val = _parse_floats("  Quaternion (x y z w): ", 4)
@@ -370,11 +387,28 @@ def _input_thread(node):
             else:
                 print(f"  Unknown constraint type: {ctype}")
 
-        elif choice == "9":
+        elif choice == "7":
             if hasattr(node, 'pose') and node.pose is not None:
                 print(f"  Current EEF pose: {node.pose}")
             else:
                 print("  Pose not yet available (waiting for joint_states).")
+
+        elif choice == "8":
+            print(f"  Current handle offset:  {node.markerToHandleOffset}")
+            print(f"  Current pickup offset:  {node.markerToPickupOffset}")
+            which = input("  Edit (h)andle offset, (p)ickup offset, or (b)oth? ").strip().lower()
+            if which in ('h', 'b'):
+                val = _parse_floats("  New handle offset (x y z): ", 3)
+                if val:
+                    node.markerToHandleOffset = np.array(val)
+                    print(f"  Handle offset set to {node.markerToHandleOffset}")
+            if which in ('p', 'b'):
+                val = _parse_floats("  New pickup offset (x y z): ", 3)
+                if val:
+                    node.markerToPickupOffset = np.array(val)
+                    print(f"  Pickup offset set to {node.markerToPickupOffset}")
+            if which not in ('h', 'p', 'b'):
+                print("  Unknown selection.")
 
         elif choice == "0":
             print("  Shutting down...")
@@ -389,22 +423,38 @@ def main():
     rclpy.init()
     
     # Create the node FIRST so we can pass it to the printer
-    node = printerAutomation(calibration_mode=False)
+    node = printerAutomation(calibration_mode=False,stream_source="webcam")
 
-    printer = Simulated3DPrinter(
+    '''printer = Simulated3DPrinter(
         node=node,
-        pos=[0.0, -0.67, 0.20],
+        pos=[0.0, -0.62, 0.18],
         orient=[0.0, 0.0, np.pi],
     )
-    printer.spawn_fast()
+    printer.spawn_fast()'''
 
     # Spin both the ROS node and the stream's internal ROS node
     executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(node)
-    executor.add_node(node.stream._ros_node)
+    # If the stream provides a ROS Node (source="ros"), add it to the executor.
+    # If using a webcam (no _ros_node), run the stream.run loop in a background thread
+    if hasattr(node.stream, "_ros_node"):
+        executor.add_node(node.stream._ros_node)
+    else:
+        stream_thread = threading.Thread(target=node.stream.run, daemon=True)
+        stream_thread.start()
 
     # Start the executor in a background thread so TF / joint_states / callbacks work
-    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    def _resilient_spin(executor):
+        """Keep spinning even if individual callbacks raise exceptions."""
+        while rclpy.ok():
+            try:
+                executor.spin_once(timeout_sec=0.1)
+            except Exception as e:
+                # Log but don't crash the spin thread
+                node.get_logger().warn(f"Executor spin error (recovering): {e}")
+                time.sleep(0.01)
+
+    spin_thread = threading.Thread(target=_resilient_spin, args=(executor,), daemon=True)
     spin_thread.start()
 
     # Wait for joint_states to arrive before scanning
@@ -416,10 +466,15 @@ def main():
 
     # Run the initial scan (blocks until move_to_pose completes)
     node.get_logger().info("Starting initial scan for markers...")
-    node.scanLocationForMarkers(
-        estimated_pos=[0.67, 0.0, 0.24],
-        estimated_orient=[0, 0, 0],  # marker Z-axis points +Y (toward robot)
+    '''node.scanLocationForMarkers(
+        estimated_pos=[0.62, 0.0, 0.20],
+        estimated_orient=[0.0, 0.0, 0],  # marker Z-axis points +Y (toward robot)
         viewing_distance=0.30
+    )'''
+    node.scanLocationForMarkers(
+        estimated_pos=[0.34, 0.06, 0.15],
+        estimated_orient=[0.0, 0.0, -np.pi/2],  # marker Z-axis points +Y (toward robot)
+        viewing_distance=0.00
     )
     node.get_logger().info("Initial scan complete.")
 
