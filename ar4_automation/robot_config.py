@@ -44,6 +44,7 @@ ROBOT_CONFIGS = {
         'base_link': "link_base",
         'end_effector_link': "link_eef",
         'move_group': "lite6",
+        'trajectory_controller': "lite6_traj_controller",
         # simulated RealSense D435i (add_realsense_d435i:=true on the launch)
         'camera_frame': "camera_color_optical_frame",
         'color_topic': "/camera/color/image_raw",
@@ -124,6 +125,7 @@ ROBOT_CONFIGS = {
         'base_link': "link_base",
         'end_effector_link': "link_eef",
         'move_group': "xarm6",
+        'trajectory_controller': "xarm6_traj_controller",
         'camera_frame': "camera_color_optical_frame",
         'color_topic': "/camera/color/image_raw",
         'depth_topic': "/camera/depth/image",

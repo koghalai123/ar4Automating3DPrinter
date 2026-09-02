@@ -27,6 +27,35 @@ def create_aruco_detector_parameters():
     return cv2.aruco.DetectorParameters()
 
 
+def detect_aruco_markers(image, dictionary, parameters):
+    """Detect markers with either the legacy or OpenCV 4.7+ API."""
+    legacy = getattr(cv2.aruco, "detectMarkers", None)
+    if legacy is not None:
+        return legacy(image, dictionary, parameters=parameters)
+    return cv2.aruco.ArucoDetector(
+        dictionary, parameters).detectMarkers(image)
+
+
+def estimate_single_marker_pose(corner, marker_size, camera_matrix,
+                                distortion):
+    """Replacement for estimatePoseSingleMarkers removed in OpenCV 4.11."""
+    legacy = getattr(cv2.aruco, "estimatePoseSingleMarkers", None)
+    if legacy is not None:
+        return legacy(corner, marker_size, camera_matrix, distortion)
+    half = float(marker_size) / 2.0
+    object_points = np.array([
+        [-half, half, 0.0], [half, half, 0.0],
+        [half, -half, 0.0], [-half, -half, 0.0],
+    ], dtype=np.float32)
+    image_points = np.asarray(corner, dtype=np.float32).reshape(4, 2)
+    ok, rvec, tvec = cv2.solvePnP(
+        object_points, image_points, camera_matrix, distortion,
+        flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    if not ok:
+        raise RuntimeError("OpenCV could not estimate ArUco pose")
+    return rvec.reshape(1, 1, 3), tvec.reshape(1, 1, 3), object_points
+
+
 # ------------------------------------------------------------------
 # Camera discovery
 # ------------------------------------------------------------------
@@ -200,6 +229,11 @@ class WebVideoStream:
 
         # ---- Web server ----
         self.frame = None
+        # Unannotated camera image used by browser-driven calibration.  Keep
+        # this separate from ``frame``: the latter contains ArUco drawings and
+        # the diagnostics panel and must never be fed back into ChArUco pose
+        # estimation.
+        self.raw_frame = None
         self.frame_id = 0
         # Condition (not Event): every MJPEG client waits on the same lock but
         # notify_all wakes all of them. A shared Event let whichever client
@@ -451,8 +485,8 @@ class WebVideoStream:
 
         all_corners, all_ids, dict_indices = [], [], []
         for idx, aruco_dict in enumerate(self.aruco_dicts):
-            corners, ids, _ = cv2.aruco.detectMarkers(
-                gray, aruco_dict, parameters=self.aruco_params)
+            corners, ids, _ = detect_aruco_markers(
+                gray, aruco_dict, self.aruco_params)
             if ids is not None:
                 all_corners.extend(corners)
                 all_ids.extend(ids)
@@ -483,7 +517,7 @@ class WebVideoStream:
                 seen.add(marker_id)
 
                 marker_size = self.marker_sizes[dict_indices[i]]
-                rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(
+                rvec, tvec, _ = estimate_single_marker_pose(
                     corner, marker_size, self.camera_matrix, self.dist_coeffs)
 
                 position_cam = tvec[0][0].copy()
@@ -491,7 +525,7 @@ class WebVideoStream:
                 rot_mat, _ = cv2.Rodrigues(rvec[0])
                 roll, pitch, yaw = R.from_matrix(rot_mat).as_euler('XYZ', degrees=False)
 
-                rvec_n, tvec_n, _ = cv2.aruco.estimatePoseSingleMarkers(
+                rvec_n, tvec_n, _ = estimate_single_marker_pose(
                     corner, marker_size, naive_K, naive_d)
                 pos_naive = tvec_n[0][0].copy()
                 dist_naive = float(np.linalg.norm(pos_naive))
@@ -669,6 +703,8 @@ class WebVideoStream:
         return cv2.warpAffine(frame, M, (w, h))
 
     def _build_frame(self, color, depth=None):
+        with self.lock:
+            self.raw_frame = color.copy()
         frame = color.copy()
         live_marker_poses = []
         if self.enable_aruco:

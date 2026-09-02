@@ -31,7 +31,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from ar4_automation.robot_config import get_robot_config
 from calibration.CameraCalibration import (
     ARUCO_DICT, MARKER_LENGTH, SQUARE_LENGTH, SQUARES_X, SQUARES_Y)
-from calibration.charuco_utils import create_board, detect, detector_parameters
+from calibration.charuco_utils import (
+    create_board, detect, detector_parameters, estimate_pose)
 from ar4_automation.web_video_server import select_camera
 
 
@@ -285,9 +286,8 @@ def main(argv=None):
             valid = cc is not None and len(cc) >= args.min_corners
             pose = None
             if valid:
-                ok, rvec, tvec = cv2.aruco.estimatePoseCharucoBoard(
-                    cc, ci, board, node.camera_matrix, node.distortion,
-                    None, None)
+                ok, rvec, tvec = estimate_pose(
+                    cc, ci, board, node.camera_matrix, node.distortion)
                 if ok:
                     pose = matrix(cv2.Rodrigues(rvec)[0], tvec)
                     cv2.drawFrameAxes(view, node.camera_matrix,

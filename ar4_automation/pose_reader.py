@@ -100,6 +100,7 @@ class PoseReader(Node):
 		self._xarm_state_update_monotonic = None
 		self._xarm_safety_configured = False
 		self._xarm_safety_error = None
+		self._trajectory_controller_active = None
 		self._fk_future = None
 		self.pose = np.array([-1,-1,-1,-1,-1,-1])
 		self.quat = np.array([-1, -1, -1, -1])
@@ -209,31 +210,20 @@ class PoseReader(Node):
 				return False
 
 		# Applying reduced/self-collision settings deliberately leaves UFACTORY
-		# controllers in CONFIG_CHANGED (state=5).  Return to START only when
-		# the state change was caused by this successful configuration sequence
-		# and the controller reports no error.  This does not clear errors,
-		# enable motors, or initiate motion.
+		# controllers in CONFIG_CHANGED (state=5), and some controller firmware
+		# also falls back to mode 0.  MoveIt trajectories require mode 1.  Restore
+		# both only after this successful configuration sequence and fresh,
+		# error-free telemetry; this does not clear errors, enable motors, or
+		# initiate motion.
 		state = self._xarm_state
 		if state is None or state['error_code'] != 0:
 			self._xarm_safety_error = (
 				"refusing to restore controller state without fresh, error-free telemetry")
 			return False
-		state_client = self.create_client(SetInt16, f"{ns}/set_state")
-		if not state_client.wait_for_service(timeout_sec=timeout):
-			self._xarm_safety_error = f"service unavailable: {ns}/set_state"
-			return False
-		state_req = SetInt16.Request()
-		state_req.data = 0
-		future = state_client.call_async(state_req)
-		deadline = time.monotonic() + timeout
-		while not future.done() and time.monotonic() < deadline:
-			time.sleep(0.01)
-		if not future.done() or future.result() is None:
-			self._xarm_safety_error = f"service failed: {ns}/set_state"
-			return False
-		if int(future.result().ret) != 0:
-			self._xarm_safety_error = (
-				f"{ns}/set_state rejected START (ret={int(future.result().ret)})")
+		try:
+			self.set_xarm_mode(1, timeout=timeout)
+		except Exception as exc:
+			self._xarm_safety_error = f"could not restore ROS position mode: {exc}"
 			return False
 		self._xarm_safety_configured = True
 		self._xarm_safety_error = None
@@ -262,6 +252,79 @@ class PoseReader(Node):
 				raise RuntimeError(
 					f'{service} rejected {value}: ret={future.result().ret}')
 		return True
+
+	def set_trajectory_controller_active(self, active, timeout=5.0):
+		"""Activate/deactivate the arm trajectory controller via ros2_control."""
+		from controller_manager_msgs.srv import ListControllers, SwitchController
+		controller = self.robot_config.get('trajectory_controller')
+		if not controller:
+			raise RuntimeError('trajectory controller is not configured')
+		list_client = self.create_client(
+			ListControllers, '/controller_manager/list_controllers')
+		if not list_client.wait_for_service(timeout_sec=timeout):
+			raise RuntimeError(
+				'service unavailable: /controller_manager/list_controllers')
+		listed = list_client.call_async(ListControllers.Request())
+		deadline = time.monotonic() + timeout
+		while not listed.done() and time.monotonic() < deadline:
+			time.sleep(0.01)
+		if not listed.done() or listed.result() is None:
+			raise RuntimeError('timed out listing ros2_control controllers')
+		current = next(
+			(c.state for c in listed.result().controller
+			 if c.name == controller), None)
+		if current is None:
+			raise RuntimeError(f'controller is not loaded: {controller}')
+		is_active = current == 'active'
+		self._trajectory_controller_active = is_active
+		if is_active == bool(active):
+			return True
+
+		client = self.create_client(
+			SwitchController, '/controller_manager/switch_controller')
+		if not client.wait_for_service(timeout_sec=timeout):
+			raise RuntimeError(
+				'service unavailable: /controller_manager/switch_controller')
+		req = SwitchController.Request()
+		if active:
+			req.activate_controllers = [controller]
+		else:
+			req.deactivate_controllers = [controller]
+		req.strictness = 2  # STRICT
+		req.activate_asap = True
+		req.timeout.sec = int(timeout)
+		future = client.call_async(req)
+		deadline = time.monotonic() + timeout
+		while not future.done() and time.monotonic() < deadline:
+			time.sleep(0.01)
+		if not future.done() or future.result() is None:
+			raise RuntimeError(
+				f'timed out switching controller {controller}')
+		if not bool(future.result().ok):
+			raise RuntimeError(
+				f'controller_manager rejected {"activation" if active else "deactivation"} '
+				f'of {controller}')
+		self._trajectory_controller_active = bool(active)
+		return True
+
+	def enter_teach_mode(self):
+		"""Safely hand trajectory ownership from MoveIt to manual guidance."""
+		self.set_trajectory_controller_active(False)
+		try:
+			return self.set_xarm_mode(2)
+		except Exception:
+			# Best-effort rollback: do not leave a failed teach transition with
+			# the normal trajectory controller unnecessarily stopped.
+			try:
+				self.set_trajectory_controller_active(True)
+			except Exception:
+				pass
+			raise
+
+	def exit_teach_mode(self):
+		"""Restore UFACTORY position mode, then return ownership to MoveIt."""
+		self.set_xarm_mode(1)
+		return self.set_trajectory_controller_active(True)
 
 	def safety_snapshot(self):
 		"""Return machine-readable interlocks for the GUI and command guard."""
@@ -297,6 +360,13 @@ class PoseReader(Node):
 					'detail': 'unknown' if state is None else (
 						f"state={state['state']} mode={state['mode']} "
 						f"err={state['error_code']} warn={state['warning_code']}"),
+				},
+				{
+					'name': 'trajectory_controller',
+					'ok': self._trajectory_controller_active is True,
+					'detail': (
+						f"{self.robot_config.get('trajectory_controller')} "
+						f"{'active' if self._trajectory_controller_active else 'inactive/unknown'}"),
 				},
 				{
 					'name': 'controller_safety_profile',

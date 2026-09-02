@@ -135,6 +135,18 @@ def start_node(sim=False, robot='ar4', joint_state_timeout=10.0, **overrides):
             node.get_logger().error(
                 "UFACTORY safety profile was not applied; motion will remain blocked: "
                 f"{node._xarm_safety_error}")
+        else:
+            try:
+                # Changing reduced/self-collision settings can leave the
+                # ros2_control trajectory controller inactive even after the
+                # physical arm is restored to START. The backend is not ready
+                # until both ownership layers are active.
+                node.set_trajectory_controller_active(True)
+            except Exception as exc:
+                node._xarm_safety_configured = False
+                node._xarm_safety_error = (
+                    f"trajectory controller activation failed: {exc}")
+                node.get_logger().error(node._xarm_safety_error)
     return node
 
 

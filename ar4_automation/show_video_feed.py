@@ -250,7 +250,9 @@ class CameraViewer(Node):
         all_ids = []
         dict_indices = []
         for idx, aruco_dict in enumerate(self.aruco_dicts):
-            corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=self.aruco_params)
+            from .web_video_server import detect_aruco_markers
+            corners, ids, _ = detect_aruco_markers(
+                gray, aruco_dict, self.aruco_params)
             if ids is not None:
                 all_corners.extend(corners)
                 all_ids.extend(ids)
@@ -281,7 +283,8 @@ class CameraViewer(Node):
                 dict_idx = dict_indices[i]
                 marker_size = self.marker_sizes[dict_idx]
 
-                rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(
+                from .web_video_server import estimate_single_marker_pose
+                rvec, tvec, _ = estimate_single_marker_pose(
                     corner, marker_size, self.camera_matrix, self.dist_coeffs,
                 )
 
