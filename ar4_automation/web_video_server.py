@@ -211,8 +211,8 @@ class WebVideoStream:
         # marker IDs camera detections may never overwrite (fixed references
         # from the save file); takes precedence over marker_updates_enabled
         self.locked_marker_ids = set()
-        # Per-marker EMA state used exclusively for the web panel display.
-        # Does NOT affect found_markers or anything returned by detect().
+        # Per-marker EMA state retained for optional text diagnostics.  Does
+        # NOT affect found_markers or anything returned by detect().
         self._display_filter_states = {}
 
         # ---- ArUco detector ----
@@ -226,12 +226,13 @@ class WebVideoStream:
             self.camera_matrix = None
             self.dist_coeffs = None
             self.last_marker_count = 0
+            self.last_marker_ids = []
 
         # ---- Web server ----
         self.frame = None
         # Unannotated camera image used by browser-driven calibration.  Keep
         # this separate from ``frame``: the latter contains ArUco drawings and
-        # the diagnostics panel and must never be fed back into ChArUco pose
+        # must never be fed back into ChArUco pose
         # estimation.
         self.raw_frame = None
         self.frame_id = 0
@@ -444,6 +445,7 @@ class WebVideoStream:
             'camera_info_age_s': age(self.last_camera_info_monotonic),
             'detection_age_s': age(self.last_detection_monotonic),
             'visible_marker_count': int(self.last_marker_count),
+            'visible_marker_ids': [int(x) for x in self.last_marker_ids],
             'known_marker_count': len(self.found_markers),
             'marker_dictionaries': list(getattr(self, 'dict_names', [])),
             'marker_sizes_m': [float(v) for v in getattr(self, 'marker_sizes', [])],
@@ -579,10 +581,12 @@ class WebVideoStream:
                             tuple(centre + np.array([0, -10])),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            count = len(all_ids)
+            visible_ids = [int(id_[0]) for id_ in all_ids]
+            count = len(visible_ids)
+            self.last_marker_ids = visible_ids
             if count != self.last_marker_count:
                 self.last_marker_count = count
-                _log(f'Detected {count} ArUco marker(s): {[id_[0] for id_ in all_ids]}')
+                _log(f'Detected {count} ArUco marker(s): {visible_ids}')
 
             # found_markers is already updated above per-marker
 
@@ -590,6 +594,7 @@ class WebVideoStream:
             if self.last_marker_count > 0:
                 _log('No ArUco markers detected')
                 self.last_marker_count = 0
+            self.last_marker_ids = []
 
         return output, live_marker_poses
 
@@ -723,9 +728,10 @@ class WebVideoStream:
                 depth_vis = cv2.cvtColor(depth_vis, cv2.COLOR_GRAY2BGR)
             frame = np.hstack([frame, depth_vis])
 
-        if self.enable_aruco:
-            # Show ALL known markers in the panel (persistent), smoothed for display only
-            frame = np.vstack([frame, self._draw_pose_panel(frame.shape[1], self._smooth_for_display(self.marker_poses))])
+        # Marker details are delivered through diagnostics and rendered beside
+        # the video in the GUI.  Do not append a text panel here: it shrinks
+        # the actual camera image in browser previews and makes marker labels
+        # and axes unnecessarily difficult to inspect.
 
         if self.display_scale and self.display_scale != 1.0:
             frame = cv2.resize(frame, None, fx=self.display_scale, fy=self.display_scale,
