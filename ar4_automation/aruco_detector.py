@@ -181,14 +181,26 @@ class ArucoDetectionViewer(PoseReader):
 
         try:
             if self.hand_eye_transform is not None:
-                base_to_eef_msg = self.tf2_buffer.lookup_transform(
-                    self.base_link_name, self.end_effector_name, Time())
-                t = base_to_eef_msg.transform.translation
-                q = base_to_eef_msg.transform.rotation
                 base_to_eef = np.eye(4)
-                base_to_eef[:3, :3] = R.from_quat(
-                    [q.x, q.y, q.z, q.w]).as_matrix()
-                base_to_eef[:3, 3] = [t.x, t.y, t.z]
+                # xArm's robot_state_publisher may retain an old /joint_states
+                # transform during teach mode.  Map detections with FK from the
+                # driver's direct joint feedback instead.  Other robots retain
+                # the standard TF path.
+                measured_pos = measured_quat = None
+                if self.robot == 'xarm6':
+                    measured_pos, measured_quat, _source = (
+                        self._eef_pose_from_measured_joints())
+                if measured_pos is not None and measured_quat is not None:
+                    base_to_eef[:3, :3] = R.from_quat(measured_quat).as_matrix()
+                    base_to_eef[:3, 3] = measured_pos
+                else:
+                    base_to_eef_msg = self.tf2_buffer.lookup_transform(
+                        self.base_link_name, self.end_effector_name, Time())
+                    t = base_to_eef_msg.transform.translation
+                    q = base_to_eef_msg.transform.rotation
+                    base_to_eef[:3, :3] = R.from_quat(
+                        [q.x, q.y, q.z, q.w]).as_matrix()
+                    base_to_eef[:3, 3] = [t.x, t.y, t.z]
                 camera_to_marker = np.eye(4)
                 camera_to_marker[:3, :3] = R.from_euler(
                     'XYZ', eulerInFrame, degrees=False).as_matrix()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import cv2
+import numpy as np
 
 
 def detector_parameters():
@@ -57,3 +58,33 @@ def estimate_pose(charuco_corners, charuco_ids, board, camera_matrix,
         return False, None, None
     return cv2.solvePnP(object_points, image_points, camera_matrix,
                         distortion)
+
+
+def calibrate_camera(charuco_corners, charuco_ids, board, image_size,
+                     flags=0):
+    """Calibrate a camera from ChArUco observations on OpenCV 4.5--4.11.
+
+    ``cv2.aruco.calibrateCameraCharuco`` was removed from newer OpenCV
+    contrib wheels.  The replacement is mathematically equivalent: map each
+    detected ChArUco ID to its known chessboard 3D point, then use the normal
+    OpenCV calibrator over those object/image point pairs.
+    """
+    legacy = getattr(cv2.aruco, "calibrateCameraCharuco", None)
+    if legacy is not None:
+        return legacy(charuco_corners, charuco_ids, board, image_size,
+                      None, None, flags=flags)
+
+    chessboard_points = np.asarray(
+        board.getChessboardCorners(), dtype=np.float32)
+    object_points = []
+    image_points = []
+    for corners, ids in zip(charuco_corners, charuco_ids):
+        ids = np.asarray(ids, dtype=np.int32).reshape(-1)
+        corners = np.asarray(corners, dtype=np.float32).reshape(-1, 1, 2)
+        if len(ids) != len(corners) or np.any(ids < 0) or \
+                np.any(ids >= len(chessboard_points)):
+            raise ValueError("invalid ChArUco corner IDs for this board")
+        object_points.append(chessboard_points[ids].reshape(-1, 1, 3))
+        image_points.append(corners)
+    return cv2.calibrateCamera(object_points, image_points, image_size,
+                               None, None, flags=flags)

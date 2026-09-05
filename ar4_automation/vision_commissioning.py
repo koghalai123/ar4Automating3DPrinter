@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shutil
 import threading
 import time
 
@@ -14,7 +15,7 @@ from scipy.spatial.transform import Rotation
 from calibration.CameraCalibration import (
     ARUCO_DICT, MARKER_LENGTH, SQUARE_LENGTH, SQUARES_X, SQUARES_Y)
 from calibration.charuco_utils import (
-    create_board, detect, detector_parameters, estimate_pose)
+    calibrate_camera, create_board, detect, detector_parameters, estimate_pose)
 
 
 def _matrix(position, quaternion):
@@ -43,6 +44,14 @@ class VisionCommissioning:
         self.observation_poses = []
         self.marker_roles = {}
         self.last_solve = None
+        # Intrinsic samples intentionally live only for the current session.
+        # They contain OpenCV arrays and should not be mixed across cameras or
+        # resolutions by accidentally resuming an old browser session.
+        self.intrinsic_samples = []
+        self.intrinsic_session_active = False
+        self.last_intrinsic = None
+        self.last_intrinsic_detection = {
+            "valid": False, "corner_count": 0, "error": None}
         self.session_active = False
         self.last_detection = {
             "valid": False, "corner_count": 0, "error": None}
@@ -159,14 +168,20 @@ class VisionCommissioning:
             camera_to_board, _ = self.inspect_board(draw=False)
             if camera_to_board is None:
                 raise RuntimeError(self.last_detection["error"])
-            position, quaternion = self.node._eef_pose_truth()
+            # Hand-eye needs the pose associated with the *measured* joints.
+            # TF can lag while the physical xArm is in teach mode, leaving the
+            # backend to reject every post-first sample as a duplicate.
+            joints, joint_source = self.node._calibration_joint_positions()
+            position, quaternion = self.node._eef_pose_from_joint_state(joints)
             if position is None:
-                raise RuntimeError("base-to-gripper TF is unavailable")
+                raise RuntimeError("base-to-gripper FK is unavailable")
             # A hand-eye pair is only meaningful when image and robot pose are
             # sampled from a stationary arm.  This also prevents captures
             # while the operator is still guiding the wrist.
             time.sleep(0.15)
-            check_position, check_quaternion = self.node._eef_pose_truth()
+            check_joints, check_source = self.node._calibration_joint_positions()
+            check_position, check_quaternion = (
+                self.node._eef_pose_from_joint_state(check_joints))
             if check_position is None:
                 raise RuntimeError("base-to-gripper TF became unavailable")
             moved = np.linalg.norm(check_position - position)
@@ -178,22 +193,37 @@ class VisionCommissioning:
             position, quaternion = check_position, check_quaternion
             base_to_gripper = _matrix(position, quaternion)
             if self.samples:
+                previous_sample = self.samples[-1]
                 previous = np.asarray(
-                    self.samples[-1]["base_to_gripper"]["matrix"])
+                    previous_sample["base_to_gripper"]["matrix"])
                 translation = np.linalg.norm(
                     base_to_gripper[:3, 3] - previous[:3, 3])
                 rotation = Rotation.from_matrix(
                     previous[:3, :3].T @ base_to_gripper[:3, :3]).magnitude()
                 if translation < 0.01 and rotation < np.radians(5):
+                    current_joints = np.asarray(check_joints or [], dtype=float)
+                    previous_joints = np.asarray(
+                        previous_sample.get("joint_positions") or [],
+                        dtype=float)
+                    max_joint_delta = None
+                    if len(current_joints) == len(previous_joints) and \
+                            len(current_joints):
+                        wrapped = (current_joints - previous_joints + np.pi) % \
+                                  (2 * np.pi) - np.pi
+                        max_joint_delta = float(np.degrees(np.max(np.abs(wrapped))))
+                    joint_detail = ("unavailable" if max_joint_delta is None
+                                    else f"{max_joint_delta:.2f} deg")
                     raise RuntimeError(
                         "pose is too similar to the previous sample; move at "
-                        "least 10 mm or rotate the wrist at least 5 degrees")
+                        "least 10 mm or rotate the wrist at least 5 degrees "
+                        f"(FK delta: {translation * 1000:.1f} mm, "
+                        f"{np.degrees(rotation):.2f} deg; measured max joint "
+                        f"delta: {joint_detail})")
             sample = {
                 "timestamp": time.time(),
                 "joint_positions": [float(x) for x in
-                                    (self.node._last_joint_msg
-                                     if self.node._last_joint_msg is not None
-                                     else [])],
+                                    (check_joints or [])],
+                "joint_source": check_source or joint_source,
                 "base_to_gripper": {"matrix": base_to_gripper.tolist()},
                 "camera_to_charuco": {"matrix": camera_to_board.tolist()},
                 "detected_corner_count": self.last_detection["corner_count"],
@@ -201,6 +231,119 @@ class VisionCommissioning:
             self.samples.append(sample)
             self._save()
             return {"sample_count": len(self.samples), "sample": sample}
+
+    # ---- Camera intrinsics -------------------------------------------------
+
+    def start_intrinsic(self, clear=False):
+        """Start a short, camera-only ChArUco calibration session.
+
+        This is deliberately independent of hand-eye samples: intrinsics need
+        many different *views of the board in the image*, while hand-eye also
+        needs corresponding robot poses.  Keeping the two sets separate makes
+        it impossible to feed unsuitable frames into the hand-eye solver.
+        """
+        with self.lock:
+            if clear:
+                self.intrinsic_samples = []
+            self.intrinsic_session_active = True
+            return self.snapshot()
+
+    def stop_intrinsic(self):
+        with self.lock:
+            self.intrinsic_session_active = False
+            return self.snapshot()
+
+    def capture_intrinsic(self):
+        with self.lock:
+            if not self.intrinsic_session_active:
+                raise RuntimeError("start an intrinsic calibration session first")
+            frame = self._raw_frame()
+            if frame is None:
+                raise RuntimeError("no camera frame is available")
+            stream = self.node.stream
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            mc, mi, _, cc, ci = detect(
+                gray, self.board, self.dictionary, self.parameters)
+            corner_count = 0 if cc is None else len(cc)
+            marker_count = 0 if mi is None else len(mi)
+            valid = marker_count >= 4 and corner_count >= 20
+            self.last_intrinsic_detection = {
+                "valid": valid, "corner_count": int(corner_count),
+                "marker_count": int(marker_count),
+                "error": None if valid else
+                "show at least 4 markers and 20 ChArUco corners",
+            }
+            if not valid:
+                raise RuntimeError(self.last_intrinsic_detection["error"])
+            size = (int(gray.shape[1]), int(gray.shape[0]))
+            if self.intrinsic_samples and size != self.intrinsic_samples[0]["size"]:
+                raise RuntimeError(
+                    "camera resolution changed; start over before capturing")
+            self.intrinsic_samples.append({
+                "corners": np.asarray(cc, dtype=np.float32).copy(),
+                "ids": np.asarray(ci, dtype=np.int32).copy(),
+                "size": size,
+                "timestamp": time.time(),
+            })
+            return {"sample_count": len(self.intrinsic_samples),
+                    "corner_count": int(corner_count), "size": size}
+
+    def discard_intrinsic(self):
+        with self.lock:
+            if not self.intrinsic_samples:
+                raise RuntimeError("there are no intrinsic calibration captures")
+            self.intrinsic_samples.pop()
+            return {"sample_count": len(self.intrinsic_samples)}
+
+    def solve_intrinsic(self):
+        """Solve and atomically apply a calibrated camera model.
+
+        We retain the old .npz as ``camera_matrix.previous.npz`` and only
+        replace the active calibration when RMS is reasonably low.  A bad
+        capture sequence therefore cannot silently degrade later ArUco poses.
+        """
+        with self.lock:
+            if len(self.intrinsic_samples) < 12:
+                raise RuntimeError("at least 12 intrinsic captures are required")
+            corners = [sample["corners"] for sample in self.intrinsic_samples]
+            ids = [sample["ids"] for sample in self.intrinsic_samples]
+            size = self.intrinsic_samples[0]["size"]
+            flags = cv2.CALIB_FIX_K3 | cv2.CALIB_FIX_K4 | cv2.CALIB_FIX_K5
+            rms, matrix, distortion, _rvecs, _tvecs = calibrate_camera(
+                corners, ids, self.board, size, flags=flags)
+            # 1 px is a conservative acceptance threshold for an ordinary USB
+            # webcam.  A result above it remains visible to the operator but
+            # does not replace the known calibration.
+            quality = bool(np.isfinite(rms) and rms <= 1.0)
+            result = {
+                "sample_count": len(self.intrinsic_samples),
+                "image_size": list(size),
+                "rms_px": float(rms),
+                "quality_passed": quality,
+                "max_rms_px": 1.0,
+                "camera_index": getattr(self.node.stream, "camera_index", None),
+            }
+            self.last_intrinsic = result
+            if not quality:
+                return result
+
+            path = pathlib.Path(getattr(self.node.stream, "calibration_file", "")
+                                or self.root / "calibration" / "camera_matrix.npz")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            backup = path.with_name("camera_matrix.previous.npz")
+            if path.is_file():
+                shutil.copy2(path, backup)
+            temporary = path.with_suffix(".tmp.npz")
+            np.savez(temporary, camera_matrix=matrix, dist_coeffs=distortion,
+                     image_size=np.asarray(size),
+                     camera_index=-1 if result["camera_index"] is None
+                                  else result["camera_index"],
+                     rms_px=float(rms))
+            temporary.replace(path)
+            self.node.stream.set_calibration(matrix, distortion)
+            result["path"] = str(path)
+            result["backup_path"] = str(backup) if backup.is_file() else None
+            return result
 
     def discard_last(self):
         with self.lock:
@@ -334,4 +477,11 @@ class VisionCommissioning:
             "last_solve": self.last_solve,
             "state_path": str(self.state_path),
             "calibration_path": str(self.calibration_path),
+            "intrinsic": {
+                "session_active": self.intrinsic_session_active,
+                "sample_count": len(self.intrinsic_samples),
+                "recommended_sample_count": 20,
+                "last_detection": dict(self.last_intrinsic_detection),
+                "last_solve": self.last_intrinsic,
+            },
         }

@@ -7,6 +7,7 @@ from flask import Flask, Response
 import threading
 import logging
 import time
+from collections import deque
 import subprocess
 import re
 import fcntl
@@ -236,6 +237,9 @@ class WebVideoStream:
         # estimation.
         self.raw_frame = None
         self.frame_id = 0
+        # Recent completed frames distinguish a slow UVC/ROS source from a
+        # deliberately rate-limited browser preview.
+        self._frame_times = deque(maxlen=60)
         # Condition (not Event): every MJPEG client waits on the same lock but
         # notify_all wakes all of them. A shared Event let whichever client
         # cleared it first swallow the wakeup for the others, dropping them to
@@ -431,6 +435,19 @@ class WebVideoStream:
         def age(value):
             return None if value is None else max(0.0, now - value)
 
+        # This is the resolution actually delivered to OpenCV / ROS, not a
+        # requested value from a desktop camera application. Intrinsics are
+        # only valid at this exact pixel geometry.
+        with self.lock:
+            raw = self.raw_frame
+            image_size = (None if raw is None else
+                          [int(raw.shape[1]), int(raw.shape[0])])
+            stamps = tuple(self._frame_times)
+        effective_fps = None
+        if len(stamps) >= 2 and stamps[-1] > stamps[0]:
+            effective_fps = round(
+                (len(stamps) - 1) / (stamps[-1] - stamps[0]), 1)
+
         return {
             'source': self.source,
             'color_topic': self.color_topic if self.source == 'ros' else None,
@@ -439,6 +456,8 @@ class WebVideoStream:
                 self.camera_info_topic if self.source == 'ros' else None),
             'camera_frame': self.camera_frame_id,
             'camera_index': self.camera_index if self.source == 'webcam' else None,
+            'image_size_px': image_size,
+            'effective_fps': effective_fps,
             'calibrated': bool(self.is_calibrated),
             'color_age_s': age(self.last_color_monotonic),
             'depth_age_s': age(self.last_depth_monotonic),
@@ -710,6 +729,7 @@ class WebVideoStream:
     def _build_frame(self, color, depth=None):
         with self.lock:
             self.raw_frame = color.copy()
+            self._frame_times.append(time.monotonic())
         frame = color.copy()
         live_marker_poses = []
         if self.enable_aruco:

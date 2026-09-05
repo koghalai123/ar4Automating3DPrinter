@@ -758,7 +758,11 @@ class printerAutomation(ArucoDetectionViewer):
             entry = self._find_marker_entry(marker_id)
             if entry is None:
                 self.get_logger().error(f"Marker {marker_id} not found in found_markers. Register it first.")
-                return False
+                # The public scan API always returns ``(move_ok, spotted)``.
+                # Keeping that contract on an early lookup failure lets GUI
+                # callers report the actual marker error instead of raising
+                # "cannot unpack non-iterable bool object".
+                return False, False
 
             offsetPos = np.array([0.0, 0.0, viewing_distance])
             badPos, badEuler = self._apply_offset_in_marker_frame(

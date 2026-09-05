@@ -98,6 +98,18 @@ class PoseReader(Node):
 		self.simulation_mode = False
 		self._xarm_state = None
 		self._xarm_state_update_monotonic = None
+		# ros2_control's /joint_states can stop updating while UFACTORY teach
+		# mode owns the arm. RobotMsg.angle remains the controller's measured
+		# joint feedback and is therefore the authoritative source for
+		# hand-guided hand-eye captures.
+		self._xarm_joint_msg = None
+		self._xarm_joint_update_monotonic = None
+		# Cache FK computed from direct xArm feedback.  This is intentionally
+		# separate from the TF pose: robot_state_publisher can receive a stale
+		# /joint_states stream while the physical arm is in teach mode.
+		self._measured_fk_cache = None
+		self._measured_fk_cache_joints = None
+		self._measured_fk_cache_monotonic = None
 		self._xarm_safety_configured = False
 		self._xarm_safety_error = None
 		self._trajectory_controller_active = None
@@ -140,6 +152,25 @@ class PoseReader(Node):
 		self.create_subscription(
 			RobotMsg, f"{namespace}/robot_states",
 			self._on_xarm_state, 10)
+		# The driver publishes raw hardware joints under its namespace (for
+		# example /xarm/joint_states). The global /joint_states is often
+		# republished by MoveIt/robot_state_publisher and can freeze when teach
+		# mode stops ros2_control ownership.
+		self.create_subscription(
+			JointState, f"{namespace}/joint_states",
+			self._on_xarm_joint_states, 10)
+
+	def _on_xarm_joint_states(self, msg):
+		"""Keep UFACTORY driver's raw measured joints in planning-group order."""
+		try:
+			angles = [float(msg.position[msg.name.index(name)])
+					  for name in self.moveit2.joint_names]
+		except (ValueError, IndexError):
+			return
+		if len(angles) == len(self.moveit2.joint_names) and \
+				np.isfinite(angles).all():
+			self._xarm_joint_msg = angles
+			self._xarm_joint_update_monotonic = time.monotonic()
 
 	def _on_xarm_state(self, msg):
 		self._xarm_state = {
@@ -151,6 +182,11 @@ class PoseReader(Node):
 			'brake_mask': int(msg.mt_brake),
 		}
 		self._xarm_state_update_monotonic = time.monotonic()
+		angles = list(getattr(msg, 'angle', []))
+		if len(angles) == len(self.moveit2.joint_names) and \
+				np.isfinite(angles).all():
+			self._xarm_joint_msg = [float(value) for value in angles]
+			self._xarm_joint_update_monotonic = time.monotonic()
 		if msg.err:
 			# Stop the active MoveIt trajectory as soon as the controller
 			# reports a collision/fault. Recovery remains an explicit operator
@@ -168,6 +204,13 @@ class PoseReader(Node):
 		"""
 		if 'xarm_safety' not in self.robot_config or self.simulation_mode:
 			self._xarm_safety_configured = True
+			return True
+		# The UFACTORY safety services briefly put the arm in a configuration
+		# changed state.  Reapplying an already accepted profile on every press
+		# of "Prepare" needlessly creates state=5/mode=0 races with MoveIt.
+		# A fresh backend starts with False, so each new ROS session still applies
+		# the profile once; this only makes repeated Prepare requests idempotent.
+		if self._xarm_safety_configured:
 			return True
 		try:
 			from xarm_msgs.srv import SetFloat32, SetInt16
@@ -464,25 +507,31 @@ class PoseReader(Node):
 			return False
 		return all(abs(a - t) <= tol for a, t in zip(actual, joint_positions))
 
-	def _eef_pose_truth(self):
-		"""link_6 pose in base_link as (pos, quat_xyzw), or (None, None).
-		TF first, FK fallback: a starved TF buffer would fake "not reached"
-		and cause false timeouts and retry thrash."""
-		try:
-			tf = self.tf_buffer.lookup_transform(
-				self.base_link_name, self.end_effector_name, Time(),
-				timeout=Duration(seconds=0.1))
-			t = tf.transform.translation
-			r = tf.transform.rotation
-			return (np.array([t.x, t.y, t.z]), np.array([r.x, r.y, r.z, r.w]))
-		except Exception:
-			pass
-		if not self._last_joint_msg:
+	def _calibration_joint_positions(self):
+		"""Return fresh measured joints and their source for hand-eye capture."""
+		if (self._xarm_joint_msg is not None and
+				self._xarm_joint_update_monotonic is not None and
+				time.monotonic() - self._xarm_joint_update_monotonic <= 1.0):
+			return list(self._xarm_joint_msg), 'xarm_robot_states'
+		if self._last_joint_msg is not None:
+			return list(self._last_joint_msg), 'joint_states'
+		return None, None
+
+	def _eef_pose_from_joint_state(self, joint_positions=None):
+		"""Compute base->EEF from the latest measured joint state.
+
+		This deliberately bypasses TF. During physical teach mode a stale
+		robot_state_publisher transform can remain available even after the arm
+		has been hand-guided, which is unsafe for hand-eye samples.
+		"""
+		joint_positions = (list(joint_positions) if joint_positions is not None
+						   else self._last_joint_msg)
+		if not joint_positions:
 			return (None, None)
 		try:
 			js = JointState()
 			js.name = list(self.moveit2.joint_names)
-			js.position = list(self._last_joint_msg)
+			js.position = list(joint_positions)
 			# This node already belongs to a background executor. The
 			# synchronous pymoveit2 helper calls rclpy.spin_once(node), which
 			# raises when a node is already attached to another executor.
@@ -514,6 +563,46 @@ class PoseReader(Node):
 		p = ps.pose.position
 		q = ps.pose.orientation
 		return (np.array([p.x, p.y, p.z]), np.array([q.x, q.y, q.z, q.w]))
+
+	def _eef_pose_from_measured_joints(self, cache_seconds=0.20):
+		"""Return base->EEF from fresh measured feedback, rather than TF.
+
+		For the physical xArm this keeps vision mapping truthful while Teach
+		Mode owns the arm and the regular robot_state_publisher TF can lag or
+		freeze.  FK is cached briefly because a single camera frame can contain
+		several detected markers.
+		"""
+		joints, source = self._calibration_joint_positions()
+		if joints is None:
+			return None, None, None
+		now = time.monotonic()
+		if (self._measured_fk_cache is not None and
+				self._measured_fk_cache_joints is not None and
+				now - (self._measured_fk_cache_monotonic or 0.0) <= cache_seconds and
+				np.allclose(joints, self._measured_fk_cache_joints,
+						atol=1e-5, rtol=0.0)):
+			pos, quat = self._measured_fk_cache
+			return pos.copy(), quat.copy(), source
+		pos, quat = self._eef_pose_from_joint_state(joints)
+		if pos is None or quat is None:
+			return None, None, source
+		self._measured_fk_cache = (pos.copy(), quat.copy())
+		self._measured_fk_cache_joints = list(joints)
+		self._measured_fk_cache_monotonic = now
+		return pos, quat, source
+
+	def _eef_pose_truth(self):
+		"""link_6 pose in base_link as (pos, quat_xyzw), or (None, None).
+		TF first, FK fallback for ordinary motion-completion checks."""
+		try:
+			tf = self.tf_buffer.lookup_transform(
+				self.base_link_name, self.end_effector_name, Time(),
+				timeout=Duration(seconds=0.1))
+			t = tf.transform.translation
+			r = tf.transform.rotation
+			return (np.array([t.x, t.y, t.z]), np.array([r.x, r.y, r.z, r.w]))
+		except Exception:
+			return self._eef_pose_from_joint_state()
 
 	def _reached_pose(self, target_pos, target_quat, pos_tol=0.025, ang_tol=0.17):
 		"""Ground-truth check that link_6 is within tolerance of the target.

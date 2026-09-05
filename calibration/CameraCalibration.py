@@ -8,7 +8,8 @@ import argparse
 # Make the repo root importable so ar4_automation resolves when run directly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ar4_automation.web_video_server import select_camera
-from calibration.charuco_utils import create_board, detect, detector_parameters
+from calibration.charuco_utils import (
+    calibrate_camera, create_board, detect, detector_parameters)
 
 # --- ChArUco board parameters (adjust to match your physical board) ---
 SQUARES_X = 11         # number of chessboard squares in X direction
@@ -126,10 +127,9 @@ def calibrate_from_images(image_glob: str = IMAGE_GLOB) -> tuple[np.ndarray, np.
     # Only k1, k2, p1, p2 are estimated. Loosen this once you have a diverse
     # image set and the RMS drops below ~1 px.
     calib_flags = (cv2.CALIB_FIX_K3 | cv2.CALIB_FIX_K4 | cv2.CALIB_FIX_K5)
-    rms, camera_matrix, dist_coeffs, _rvecs, _tvecs = cv2.aruco.calibrateCameraCharuco(
-        all_charuco_corners, all_charuco_ids, board, image_size, None, None,
-        flags=calib_flags
-    )
+    rms, camera_matrix, dist_coeffs, _rvecs, _tvecs = calibrate_camera(
+        all_charuco_corners, all_charuco_ids, board, image_size,
+        flags=calib_flags)
 
     print(f"\nReprojection RMS error: {rms:.4f} px")
 
