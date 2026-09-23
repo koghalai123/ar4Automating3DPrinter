@@ -1,0 +1,8 @@
+timestamp,call_chain,duration_s
+2026-09-22T16:42:37.895046,purge_collision_scene,0.2244
+2026-09-22T16:42:38.345608,add_ground_plane,0.0227
+2026-09-22T16:42:40.433202,go_home,1.8376
+2026-09-22T16:43:37.780412,scanMarkerApproach > scanToMarker,57.169
+2026-09-22T16:43:48.147022,scanMarkerApproach > scanToMarker,10.3659
+2026-09-22T16:43:48.147408,scanMarkerApproach,67.536
+2026-09-22T16:44:56.925511,go_home,36.0103

@@ -42,12 +42,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Address, port and token live in robot_link.py, the file shared byte-for-byte
 # with the website computer, so the two ends can't drift.
-from ar4Automating3DPrinter.tools.robot_link import (AUTH_TOKEN, BIND_HOST, PROTOCOL_VERSION, ROBOT_HOST,
-                        ROBOT_PORT)
+from tools.robot_link import (AUTH_TOKEN, BIND_HOST, PROTOCOL_VERSION, ROBOT_HOST,
+                             ROBOT_PORT)
 
 # ---- config (edit these; no CLI args) ------------------------------------
 ROBOT = 'xarm6'      # 'ar4' | 'lite6' | 'xarm6' (see ar4_automation/robot_config.py)
-SPEED_SCALE = 0.2    # MoveIt vel/accel scaling for every move this agent makes
+SPEED_SCALE = 0.5    # Default MoveIt vel/accel scaling; editable per motion command
 
 # 1 = the Gazebo stack (launchVirtualXArm6.sh), images off the bridged camera.
 # 0 = the real arm, images off the USB webcam. Getting this wrong hangs the
@@ -196,40 +196,65 @@ def list_markers():
 # Under DRY_RUN each prints the call it would have made and returns that line
 # as its result.
 
+def motion_node(velocity_scaling):
+    """Validate and apply this command's velocity and acceleration scaling."""
+    if isinstance(velocity_scaling, bool):
+        raise ValueError("velocity_scaling must be a number greater than 0 and at most 1")
+    try:
+        scale = float(velocity_scaling)
+    except (TypeError, ValueError):
+        raise ValueError("velocity_scaling must be a number greater than 0 and at most 1") from None
+    if not 0 < scale <= 1:
+        raise ValueError("velocity_scaling must be greater than 0 and at most 1")
+    if DRY_RUN:
+        dry(f"velocity and acceleration scaling={scale}")
+        return None
+    node = get_node()
+    node.moveit2.max_velocity = scale
+    node.moveit2.max_acceleration = scale
+    return node
+
+
 @command
-def go_home(velocity_scaling: float = 0.2):
+def go_home(velocity_scaling: float = SPEED_SCALE):
+    node = motion_node(velocity_scaling)
     if DRY_RUN:
         return dry(f"node.go_home(velocity_scaling={velocity_scaling})")
-    get_node().go_home(velocity_scaling=velocity_scaling)
+    node.go_home(velocity_scaling=float(velocity_scaling))
     return "home"
 
 
 @command
-def scan_marker(marker_id: int = 1, viewing_distance: float = 0.15):
+def scan_marker(marker_id: int = 1, viewing_distance: float = 0.15,
+                velocity_scaling: float = SPEED_SCALE):
+    node = motion_node(velocity_scaling)
     if DRY_RUN:
         return dry(f"node.scanMarkerApproach(marker_id={int(marker_id)}, "
                    f"viewing_distance={float(viewing_distance)})")
-    get_node().scanMarkerApproach(marker_id=int(marker_id),
+    node.scanMarkerApproach(marker_id=int(marker_id),
                                   viewing_distance=float(viewing_distance))
     return f"scanned marker {marker_id}"
 
 
 @command
-def pickup_plate(source_id: int = 2):
+def pickup_plate(source_id: int = 2, velocity_scaling: float = SPEED_SCALE):
+    node = motion_node(velocity_scaling)
     if DRY_RUN:
         return dry(f"node.pickupOnly(source_id={int(source_id)}, "
                    f"wait_after_pickup=False)")
-    ok = get_node().pickupOnly(source_id=int(source_id),
+    ok = node.pickupOnly(source_id=int(source_id),
                                wait_after_pickup=False)
     return "picked up" if ok else "pickup failed"
 
 
 @command
-def scrape_plate(source_id: int = 2, scrape_id: int = 1):
+def scrape_plate(source_id: int = 2, scrape_id: int = 1,
+                 velocity_scaling: float = SPEED_SCALE):
+    node = motion_node(velocity_scaling)
     if DRY_RUN:
         return dry(f"node.scrapePlate(source_id={int(source_id)}, "
                    f"scrape_id={int(scrape_id)}, wait_after_pickup=False)")
-    ok = get_node().scrapePlate(source_id=int(source_id),
+    ok = node.scrapePlate(source_id=int(source_id),
                                 scrape_id=int(scrape_id),
                                 wait_after_pickup=False)
     return "scraped" if ok else "scrape failed"

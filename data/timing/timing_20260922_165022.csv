@@ -1,0 +1,9 @@
+timestamp,call_chain,duration_s
+2026-09-22T16:50:26.316029,purge_collision_scene,0.2685
+2026-09-22T16:50:26.744859,add_ground_plane,0.0217
+2026-09-22T16:50:28.608255,go_home,1.8541
+2026-09-22T16:50:55.248892,scrapePlate > pickupPlate > moveToMarker > _scan_with_retries > scanToMarker,16.0255
+2026-09-22T16:50:55.249552,scrapePlate > pickupPlate > moveToMarker > _scan_with_retries,16.0262
+2026-09-22T16:50:55.250358,scrapePlate > pickupPlate > moveToMarker,16.0274
+2026-09-22T16:50:55.250506,scrapePlate > pickupPlate,16.0276
+2026-09-22T16:50:55.250523,scrapePlate,16.029

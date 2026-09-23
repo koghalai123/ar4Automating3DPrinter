@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Scan for markers 1 and 2 only, then start the interactive command menu.
+Scan for the markers listed in hardware_specs (currently marker 2 only; marker 1
+is commented out), then start the interactive command menu.
 
 Set runVirtual = 1 in main() to run against Gazebo 
 (start it first with
@@ -78,34 +79,41 @@ def main():
          "orient": [0.0, 0.0, 1*np.pi], "printer_model": 'a1_mini'},
     ]'''
 
+    # Marker 1 is dropped for now: its entry is commented out here and that is
+    # the only edit needed — spawning, seeds, offset config and the scan loop
+    # below all iterate over `specs`. Uncomment to bring it back (and bump the
+    # sim count to 2 so sim_printer_specs hands back both).
     hardware_specs = [
-            {"marker_id": 1, "pos": [0.4131, -0.2064, 0.1168],
-             "orient": [-1/2*np.pi, 0.0, 2/2*np.pi], "printer_model": 'a1'},
+            #{"marker_id": 1, "pos": [0.4131, -0.2064, 0.1168],
+            # "orient": [-1/2*np.pi, 0.0, 2/2*np.pi], "printer_model": 'a1'},
             {"marker_id": 2, "pos": [0.6179, 0.1552, 0.0789],
              "orient": [1/2*np.pi, 0.0, -1/2*np.pi], "printer_model": 'a1_mini'},
         ]
-    specs = sim_printer_specs(robot, 2) if runVirtual else hardware_specs
+    # sim_printer_specs takes the LAST n of the layout, so count=1 is marker 2
+    specs = sim_printer_specs(robot, 1) if runVirtual else hardware_specs
+    marker_ids = [s["marker_id"] for s in specs]
 
     if runVirtual:
         if use_manual_estimates:
             # spawn the printers where the hand-taught markers say they are, so
             # what the scan looks for and what stands in Gazebo agree
-            printer2, printer3 = spawn_printers_from_markers(
-                node, specs, source=MANUAL)
+            printers = spawn_printers_from_markers(node, specs, source=MANUAL)
         else:
-            printer2, printer3 = spawn_sim_printers(node, specs)
+            printers = spawn_sim_printers(node, specs)
     else:
         # hardware: nothing is spawned; these only supply geometric seeds for
         # the scan when no marker file is used (see use_manual_estimates)
-        printer2, printer3 = [make_sim_printer(node, s) for s in specs]
+        printers = [make_sim_printer(node, s) for s in specs]
 
-    node.get_logger().info("Starting initial scan for markers 1 and 2...")
+    node.get_logger().info(f"Starting initial scan for markers {marker_ids}...")
     node.load_state()
     # markers are pinned by default — each only updates during its own scan
     # windows, so menu scrapes can't drift the scrape marker between runs
 
-    node.marker_offset_config[1] = 'box_offset'
-    node.marker_offset_config[2] = 'printer_offset'
+    # waypoint set per marker; only applied for markers still in `specs`
+    offset_configs = {1: 'box_offset', 2: 'printer_offset'}
+    for mid in marker_ids:
+        node.marker_offset_config[mid] = offset_configs[mid]
 
     # register the initial door-marker estimates (after load_state so stale
     # saved poses can't shadow them), then scan both markers
@@ -120,8 +128,8 @@ def main():
     if not manual_ids:
         # geometric estimates: where each printer's 'door' mount sits, given the
         # body poses above
-        #printer2.register_marker_estimates(node)
-        printer3.register_marker_estimates(node)
+        for printer in printers:
+            printer.register_marker_estimates(node)
 
     # save the body poses alongside the markers, so restore_saved_printers can
     # rebuild these printers in a later session
@@ -129,8 +137,8 @@ def main():
 
 
     viewing_distance = 0.15
-    #node.scanMarkerApproach(marker_id=1, viewing_distance=viewing_distance)
-    node.scanMarkerApproach(marker_id=2, viewing_distance=viewing_distance)
+    for mid in marker_ids:
+        node.scanMarkerApproach(marker_id=mid, viewing_distance=viewing_distance)
 
     node.get_logger().info("Initial scan complete.")
 

@@ -163,6 +163,12 @@ class printerAutomation(ArucoDetectionViewer):
         # re-observing between steps — so a poor initial estimate is walked in
         # gradually instead of chased across the workspace in one big move
         self.scan_approach_max_step = 0.50
+        # how many of those correction steps a scan may take. 0 = go straight
+        # to the estimated viewing pose and stop, so each scan distance is ONE
+        # move plus scanToMarker's own observation (the mid-approach 1 s window
+        # and the follow-up move are what made every distance look like it
+        # scanned twice). Raise it to re-enable walking in a bad estimate.
+        self.scan_approach_corrections = 0
         # recorded {'traj': file} guide paths are downsampled to joint configs
         # at most this far apart (rad, max over any joint) before replaying —
         # only used by the per-config fallback walk
@@ -2056,15 +2062,18 @@ class printerAutomation(ArucoDetectionViewer):
 
     def _approach_viewing_pose(self, marker_id, viewing_distance):
         """Move to marker_id's viewing pose. The initial travel to the
-        estimated pose is one direct, unclamped move; a short observation
+        estimated pose is one direct, unclamped move; that is the whole
+        approach while scan_approach_corrections is 0 (the default — one move
+        per scan distance). With corrections enabled, a short observation
         there lets the camera correct the estimate, and any resulting CHANGE
         of the viewing pose is then approached in steps of at most
         scan_approach_max_step (re-observing between steps) until the target
         stops moving. Returns the last move's success."""
         max_step = self.scan_approach_max_step
-        # cap on correction steps; generous — reached only if the target keeps
-        # receding, e.g. the estimate is refined away from the arm every step
-        for step_i in range(15):
+        # cap on correction steps; reached only if the target keeps receding,
+        # e.g. the estimate is refined away from the arm every step
+        corrections = max(int(self.scan_approach_corrections), 0)
+        for step_i in range(corrections + 1):
             target_pos, target_euler = self._viewing_pose_for(marker_id, viewing_distance)
             if target_pos is None:
                 self.get_logger().error(
@@ -2091,8 +2100,9 @@ class printerAutomation(ArucoDetectionViewer):
             goodPos, goodEuler = self.to_good_frame(move_pos, target_euler)
             if not self.move_to_pose(goodPos, goodEuler):
                 return False
-            if step_i > 0 and not clamp:
-                # arrived at the corrected viewing pose
+            if step_i >= corrections or (step_i > 0 and not clamp):
+                # no corrections wanted (the default), or arrived at the
+                # corrected viewing pose — leave the observing to scanToMarker
                 return True
             # after the initial travel and each clamped step: brief window so a
             # sighting can correct the estimate before the next iteration. Not
@@ -2105,7 +2115,8 @@ class printerAutomation(ArucoDetectionViewer):
                 self.block_marker_updates()
         self.get_logger().error(
             f"scan approach: viewing pose for marker {marker_id} not reached within "
-            f"15 correction steps of {max_step:.2f} m — estimate may be diverging. Aborting."
+            f"{corrections} correction step(s) of {max_step:.2f} m — estimate may be "
+            "diverging. Aborting."
         )
         return False
 
@@ -3063,6 +3074,16 @@ class printerAutomation(ArucoDetectionViewer):
         tool at the floor on both xarm arms, and a gripper closing at home moves
         no arm joints, so nothing can back it off. Aborts (returns False) if that
         state cannot be read rather than moving to a guessed pose."""
+        # JSON encodes a whole-number speed as an int. ROS's native message
+        # conversion requires floats and can abort the process for an int.
+        if isinstance(velocity_scaling, bool):
+            raise ValueError("velocity_scaling must be a number greater than 0 and at most 1")
+        try:
+            velocity_scaling = float(velocity_scaling)
+        except (TypeError, ValueError):
+            raise ValueError("velocity_scaling must be a number greater than 0 and at most 1") from None
+        if not 0 < velocity_scaling <= 1:
+            raise ValueError("velocity_scaling must be greater than 0 and at most 1")
         self.get_logger().warn(
             f"go_home: resyncing to home position (velocity_scaling={velocity_scaling}). "
             "Planning from actual encoder state to correct any step-loss drift."
@@ -3110,5 +3131,3 @@ class printerAutomation(ArucoDetectionViewer):
             f"home pose from SRDF group_state '{state_name}': "
             f"{np.round(self._home_joints_cache, 4).tolist()}")
         return self._home_joints_cache
-
-

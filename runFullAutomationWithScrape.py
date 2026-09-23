@@ -22,7 +22,7 @@ from ar4_automation.printerclass import BambuPrinter, load_printer_config, strip
 
 
 # ---- Configuration ----
-ROBOT           = 'ar4'       # 'ar4' | 'lite6' | 'xarm6' (see ar4_automation/robot_config.py).
+ROBOT           = 'xarm6'       # 'ar4' | 'lite6' | 'xarm6' (see ar4_automation/robot_config.py).
                               # Marker poses and printer configs come from the
                               # per-robot save file (run scanFor2Markers.py for
                               # this ROBOT first) — no hardcoded frame values here.

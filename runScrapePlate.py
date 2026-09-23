@@ -48,7 +48,7 @@ COLLISIONS      = 1
 def main():
     rclpy.init()
     node = start_node(sim=RUN_SIM, robot=ROBOT, collisions=COLLISIONS)
-    speed_scale = 0.5
+    speed_scale = 1.0
     node.moveit2.max_velocity = speed_scale
     node.moveit2.max_acceleration = speed_scale
     if RUN_SIM and not SPAWN_FROM_SCAN:
