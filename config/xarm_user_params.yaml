@@ -11,3 +11,5 @@ ufactory_driver:
       set_reduced_mode: true
       set_reduced_max_tcp_speed: true
       set_reduced_max_joint_speed: true
+      get_cgpio_digital: true
+      set_cgpio_digital: true

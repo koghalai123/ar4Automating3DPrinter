@@ -132,10 +132,18 @@ ROBOT_CONFIGS = {
         'camera_info_topic': "/camera/color/camera_info",
         # Provisional until the physical wrist-camera transform is measured.
         'camera_z_offset': 0.04,
-        # The actual end tool has not yet been identified/commissioned.  A
-        # physical manipulation routine must fail instead of simulating a
-        # successful grasp with a no-op gripper.
-        'gripper': None,
+        # Physical plate gripper wired to controller-box CO0. HIGH closes;
+        # LOW opens. The controller output is verified after each command,
+        # but this is not a part-presence/grasp sensor.
+        'gripper': {
+            'type': 'cgpio',
+            'namespace': '/xarm',
+            'ionum': 0,
+            'open_value': 0,
+            'close_value': 1,
+            'fixed_output': True,
+            'plate_routines_enabled': False,
+        },
         'frame_rotation_angles': np.array([0.0, 0.0, 0.0]),
         'frame_offset_angles': np.array([0.0, 0.0, 0.0]),
         'offset_ori': np.array([np.pi, 0.0, np.pi / 2]),

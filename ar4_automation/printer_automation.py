@@ -291,12 +291,34 @@ class printerAutomation(ArucoDetectionViewer):
         # Gripper interface (robots without one configured run gripper-disabled)
         gripper_cfg = self.robot_config['gripper']
         self._lite6_gripper_clients = {}
+        self._cgpio_gripper_clients = {}
+        self.gripper_command = None
+        self._gripper_output_verified = None
+        self._gripper_last_error = None
         if gripper_cfg is None:
             self.gripper = None
             self.gripper_disabled = True
             self.get_logger().info(
                 f"No gripper configured for robot '{robot}'; gripper commands are skipped."
             )
+        elif gripper_cfg.get('type') == 'cgpio':
+            try:
+                from xarm_msgs.srv import GetDigitalIO, SetDigitalIO
+                namespace = gripper_cfg['namespace'].rstrip('/')
+                ionum = int(gripper_cfg.get('ionum', -1))
+                values = (int(gripper_cfg.get('open_value', -1)),
+                          int(gripper_cfg.get('close_value', -1)))
+                if not 0 <= ionum < 8 or any(value not in (0, 1) for value in values):
+                    raise ValueError('CGPIO gripper must use CO0..CO7 and binary values')
+                self._cgpio_gripper_clients = {
+                    'set': self.create_client(SetDigitalIO, f"{namespace}/set_cgpio_digital"),
+                    'get': self.create_client(GetDigitalIO, f"{namespace}/get_cgpio_digital"),
+                }
+                self.gripper = 'cgpio'
+            except (ImportError, ValueError) as exc:
+                self.gripper = None
+                self.gripper_disabled = True
+                self.get_logger().error(f"CGPIO gripper commands disabled: {exc}")
         elif gripper_cfg.get('type') == 'lite6_service':
             try:
                 from xarm_msgs.srv import Call
@@ -628,6 +650,8 @@ class printerAutomation(ArucoDetectionViewer):
             self.get_logger().info("Gripper disabled — skipping open.")
             return
         self.get_logger().info("Opening gripper...")
+        if self.gripper == 'cgpio':
+            return self._call_cgpio_gripper('open')
         if self.gripper == 'lite6_service':
             return self._call_lite6_gripper('open')
         self.gripper.open()
@@ -638,6 +662,8 @@ class printerAutomation(ArucoDetectionViewer):
             self.get_logger().info("Gripper disabled — skipping close.")
             return
         self.get_logger().info("Closing gripper...")
+        if self.gripper == 'cgpio':
+            return self._call_cgpio_gripper('close')
         if self.gripper == 'lite6_service':
             return self._call_lite6_gripper('close')
         self.gripper.close()
@@ -664,7 +690,65 @@ class printerAutomation(ArucoDetectionViewer):
                 f"Lite 6 gripper {action} failed (ret={ret}): {message}")
         return True
 
-    # ---- Marker updates ----
+    def _call_cgpio_gripper(self, action, timeout=5.0):
+        """Drive the configured controller output and verify CO state."""
+        from xarm_msgs.srv import GetDigitalIO, SetDigitalIO
+        cfg = self.robot_config['gripper']
+        ionum = int(cfg['ionum'])
+        value = int(cfg['open_value'] if action == 'open' else cfg['close_value'])
+
+        client = self._cgpio_gripper_clients['set']
+        service_deadline = time.monotonic() + min(timeout, 5.0)
+        while not client.wait_for_service(timeout_sec=0.5):
+            if time.monotonic() >= service_deadline:
+                raise RuntimeError(
+                    'CGPIO gripper service unavailable: /xarm/set_cgpio_digital')
+        request = SetDigitalIO.Request()
+        request.ionum = ionum
+        request.value = value
+        request.delay_sec = 0.0
+        future = client.call_async(request)
+        deadline = time.monotonic() + timeout
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not future.done() or future.result() is None:
+            raise RuntimeError(f'CGPIO gripper {action} timed out')
+        response = future.result()
+        if int(response.ret) != 0:
+            raise RuntimeError(f'CGPIO gripper {action} failed (ret={response.ret}): {response.message}')
+
+        self.gripper_command = action
+        self._gripper_output_verified = None
+        self._gripper_last_error = None
+        reader = self._cgpio_gripper_clients['get']
+        if reader.wait_for_service(timeout_sec=1.0):
+            read = reader.call_async(GetDigitalIO.Request())
+            read_deadline = time.monotonic() + timeout
+            while not read.done() and time.monotonic() < read_deadline:
+                time.sleep(0.01)
+            answer = read.result() if read.done() else None
+            if answer is not None and int(answer.ret) == 0 and len(answer.digitals) > ionum:
+                actual = int(answer.digitals[ionum])
+                self._gripper_output_verified = actual == value
+                if actual != value:
+                    self._gripper_last_error = f'CO{ionum} readback={actual}, expected={value}'
+                    raise RuntimeError(self._gripper_last_error)
+            else:
+                self._gripper_last_error = 'CGPIO output readback unavailable'
+        else:
+            self._gripper_last_error = 'CGPIO output readback service unavailable'
+        return True
+
+    def gripper_status(self):
+        """Controller-output state; never claim it confirms a physical grasp."""
+        if self.gripper != 'cgpio':
+            return {'kind': self.gripper, 'command': self.gripper_command, 'sensed': False}
+        cfg = self.robot_config['gripper']
+        return {'kind': 'cgpio', 'command': self.gripper_command, 'sensed': False,
+                'output_verified': self._gripper_output_verified, 'ionum': int(cfg['ionum']),
+                'output_locked': bool(cfg.get('fixed_output')),
+                'plate_routines_enabled': bool(cfg.get('plate_routines_enabled', False)), 'last_error': self._gripper_last_error}
+
 
     def freeze_markers(self):
         """Disable marker pose updates. Call before moving the robot."""
